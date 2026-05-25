@@ -8,6 +8,7 @@ import android.net.wifi.WifiManager
 import android.os.Build
 import android.os.PowerManager
 import android.provider.Settings
+import android.annotation.SuppressLint
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 
@@ -92,9 +93,10 @@ class SystemController(private val context: Context) {
 
     // ── Bluetooth ───────────────────────────────────────────────────────────
 
+    @SuppressLint("MissingPermission")
     fun isBluetoothEnabled(): Boolean = try {
         btManager?.adapter?.isEnabled == true
-    } catch (e: SecurityException) { 
+    } catch (e: SecurityException) {
         false // API 31+ requires BLUETOOTH_CONNECT permission
     }
 
@@ -103,10 +105,11 @@ class SystemController(private val context: Context) {
         context.startActivity(intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))
     }
 
+    @SuppressLint("MissingPermission")
     fun getBondedDevices(): List<String> = try {
         btManager?.adapter?.bondedDevices?.map { it.name ?: "Unknown" } ?: emptyList()
-    } catch (e: SecurityException) { 
-        emptyList() 
+    } catch (e: SecurityException) {
+        emptyList()
     }
 
     // ── Power ───────────────────────────────────────────────────────────────
