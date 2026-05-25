@@ -14,6 +14,7 @@ import com.max.agent.scripting.ScriptingEngine
 import com.max.agent.selffix.HotSwapper
 import com.max.agent.system.SystemController
 import com.max.agent.terminal.TerminalEngine
+import com.max.agent.network.NetworkGuard
 import kotlinx.coroutines.TimeoutCancellationException
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
@@ -44,6 +45,7 @@ class Agency(
     private val scriptingEngine: ScriptingEngine? = null,
     private val githubEngine: GithubEngine,
     private val apkInstaller: ApkInstaller,
+    private val networkGuard: NetworkGuard,
     private val onSetVoice: ((String, Float, Float) -> Unit)? = null
 ) {
     // Scoped-storage compliant. context.getExternalFilesDir is app-owned and does
@@ -286,11 +288,26 @@ class Agency(
             }
         }
 
-        // These are unsafe to expose without explicit OS plumbing — refuse loudly.
-        ActionType.TOGGLE_INTERNET ->
-            failed(action, "TOGGLE_INTERNET requires owner action via NetworkGuard UI; not callable from agent")
-        ActionType.LAUNCH_APP ->
-            failed(action, "LAUNCH_APP requires owner-side intent dispatch; not yet wired")
+        ActionType.TOGGLE_INTERNET -> {
+            val enable = action.params["enable"]?.toBoolean() ?: false
+            if (enable) networkGuard.ownerRequestInternet()
+            else networkGuard.ownerDisableInternet()
+            val flag = if (enable) "ALLOW" else "BLOCK"
+            ActionResult(action, true, "NetworkGuard policy flag set to $flag")
+        }
+        ActionType.LAUNCH_APP -> {
+            val pkg = action.params["pkg"].orEmpty()
+            if (pkg.isBlank()) failed(action, "Missing 'pkg'")
+            else {
+                val intent = context.packageManager.getLaunchIntentForPackage(pkg)
+                if (intent == null) failed(action, "No launch intent for package '$pkg'")
+                else {
+                    intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                    context.startActivity(intent)
+                    ActionResult(action, true, "Launched $pkg")
+                }
+            }
+        }
 
         ActionType.NONE -> ActionResult(action, true, "no-op")
     }

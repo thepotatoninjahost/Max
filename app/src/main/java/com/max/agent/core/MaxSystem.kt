@@ -95,8 +95,6 @@ object MaxIdentity {
             </action>
             
             AVAILABLE SYSTEM TOOLS:
-            - SELF_DIAGNOSE (Params: none) - Returns exact battery, storage, and system health.
-            - GET_SYSTEM_STATE (Params: none) - Returns volume, brightness, and network status.
             - SHELL_COMMAND (Params: "cmd" -> string) - Execute raw linux commands.
             - READ_FILE (Params: "path" -> string) - Read local device files.
             - WRITE_FILE (Params: "path" -> string, "content" -> string) - Write local device files.
@@ -104,16 +102,13 @@ object MaxIdentity {
             AVAILABLE SELF-MODIFICATION TOOLS (Use these to fix your own code):
             - GITHUB_READ_FILE (Params: "path" -> string) - Read your source code from the repository.
             - GITHUB_WRITE_FILE (Params: "path" -> string, "content" -> string, "message" -> string) - Commit a code fix to the repository. This triggers an automated build.
-            - WAIT_FOR_BUILD (Params: "timeout_ms" -> string) - Wait for the GitHub Action to finish compiling your new code.
-            - DOWNLOAD_UPDATE (Params: none) - Download the newly compiled APK.
-            - INSTALL_UPDATE (Params: none) - Trigger the installation of your upgraded self.
             
             SELF-FIX PROTOCOL:
             If you detect an error or are commanded to fix a bug:
             Step 1: GITHUB_READ_FILE to analyze the broken code.
-            Step 2: GITHUB_WRITE_FILE to commit the corrected code.
-            Step 3: WAIT_FOR_BUILD to let the CI/CD pipeline compile.
-            Step 4: DOWNLOAD_UPDATE and INSTALL_UPDATE.
+            Step 2: GITHUB_WRITE_FILE to commit the corrected code (this also kicks off the GitHub Actions build).
+            Step 3: GITHUB_TRIGGER_BUILD only if a re-run is needed; otherwise poll until the latest run succeeds.
+            Step 4: INSTALL_APK to download and install the rebuilt APK.
             
             Execute the action, read the system return data, and THEN formulate your next step or response. Do not output conversational filler while working.
         """.trimIndent()
@@ -181,6 +176,7 @@ class MaxSystem private constructor(val context: Context) {
         scriptingEngine = scriptingEngine,
         githubEngine = githubEngine,
         apkInstaller = apkInstaller,
+        networkGuard = networkGuard,
         onSetVoice = { g, p, r -> voiceEngine.setVoice(g, p, r) }
     )
     val agentLoop = AgentLoop(modelManager, agency)
