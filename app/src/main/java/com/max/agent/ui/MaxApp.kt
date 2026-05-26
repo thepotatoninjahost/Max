@@ -62,13 +62,17 @@ import java.util.*
 // Abstract Matrix Colors & Styles
 // ─────────────────────────────────────────────────────────────────────────────
 
-val VoidBlack = Color(0xFF000000)
-val Carbon = Color(0xFF0A0A0A)
-val CyanCore = Color(0xFF00FFFF)
-val AlertRed = Color(0xFFFF003C)
-val WarningYellow = Color(0xFFFFD700)
-val GhostWhite = Color(0xFFE0E0E0)
-val GhostDim = Color(0xFF404040)
+// === SUPERVILLAIN PALETTE ===
+// Dark, gloomy substrate with vivid radioactive accents.
+val VoidBlack      = Color(0xFF000000)
+val Carbon         = Color(0xFF0A080C)   // slight purple tint
+val ObsidianMist   = Color(0xFF1A141F)   // panel surface
+val CyanCore       = Color(0xFF39FF14)   // toxic neon green (primary accent)
+val AlertRed       = Color(0xFF8B0000)   // blood red (danger / destructive)
+val WarningYellow  = Color(0xFFFF6B00)   // hazard orange (warn / caution)
+val VenomPurple    = Color(0xFF9D00FF)   // venom purple (secondary accent)
+val GhostWhite     = Color(0xFFC8C8C8)   // primary text — dimmed for gloom
+val GhostDim       = Color(0xFF2A2A2A)   // borders / muted text
 
 val MatrixFont = FontFamily.Monospace
 
@@ -517,17 +521,29 @@ private fun ModelsTab(max: MaxSystem) {
                 Spacer(Modifier.height(12.dp))
                 
                 MatrixText("PRIMARY (PERSISTENT)", GhostDim, 10)
+                val configuredEverydayName = max.modelManager.getModelByPath(configuredEverydayPath)?.name
+                val primaryLoading = everydaySlotState.isLoading
+                val primaryError = everydaySlotState.error
                 Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.fillMaxWidth().padding(vertical = 4.dp)) {
-                    MatrixText(if (everydaySlotState.isLoaded) "● ${everydaySlotState.loadedModel?.name}" else "○ UNASSIGNED", if (everydaySlotState.isLoaded) CyanCore else AlertRed, 12, modifier = Modifier.weight(1f))
+                    val label = when {
+                        primaryLoading -> "⟳ LOADING: ${everydaySlotState.loadedModel?.name ?: configuredEverydayName ?: "..."}"
+                        everydaySlotState.isLoaded -> "● ${everydaySlotState.loadedModel?.name}"
+                        configuredEverydayName != null -> "○ CACHED: $configuredEverydayName"
+                        else -> "○ UNASSIGNED"
+                    }
+                    MatrixText(label, if (everydaySlotState.isLoaded || configuredEverydayName != null) WarningYellow else AlertRed, 12, modifier = Modifier.weight(1f))
                     if (everydaySlotState.isLoaded || everydaySlotState.isLoading) {
                         WireframeButton("UNLOAD", AlertRed, { max.modelManager.releaseSlot(ModelManager.Slot.EVERYDAY); max.modelManager.saveSlotConfig(null, configuredCoderName?.let { max.modelManager.getSlotEntry(ModelManager.Slot.CODER)?.path }); configuredEverydayPath = null })
                     }
                 }
-                
+                if (primaryError != null) {
+                    MatrixText("✗ ERR: $primaryError", AlertRed, 10, modifier = Modifier.fillMaxWidth().padding(start = 12.dp, bottom = 4.dp))
+                }
+
                 Spacer(Modifier.height(8.dp))
-                MatrixText("SECONDARY (TACTICAL)", GhostDim, 10)
+                MatrixText("SECONDARY (TACTICAL)", VenomPurple, 10)
                 Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.fillMaxWidth().padding(vertical = 4.dp)) {
-                    MatrixText(if (coderSlotState.isLoaded) "● ${coderSlotState.loadedModel?.name}" else if (configuredCoderName != null) "○ CACHED: $configuredCoderName" else "○ UNASSIGNED", if (coderSlotState.isLoaded || configuredCoderName != null) WarningYellow else AlertRed, 12, modifier = Modifier.weight(1f))
+                    MatrixText(if (coderSlotState.isLoaded) "● ${coderSlotState.loadedModel?.name}" else if (configuredCoderName != null) "○ CACHED: $configuredCoderName" else "○ UNASSIGNED", if (coderSlotState.isLoaded) VenomPurple else if (configuredCoderName != null) WarningYellow else AlertRed, 12, modifier = Modifier.weight(1f))
                     if (coderSlotState.isLoaded || coderSlotState.isLoading) {
                         WireframeButton("UNLOAD", AlertRed, { max.modelManager.releaseSlot(ModelManager.Slot.CODER); max.modelManager.saveSlotConfig(configuredEverydayPath, null); configuredCoderName = null })
                     }
@@ -544,7 +560,7 @@ private fun ModelsTab(max: MaxSystem) {
             }
         }
 
-        item { MatrixText("AVAILABLE CORES", CyanCore, 16, FontWeight.Bold) }
+        item { MatrixText("AVAILABLE CORES", VenomPurple, 16, FontWeight.Bold) }
         
         items(available) { entry ->
             val isLoaded = modelState.isLoaded && modelState.loadedModel?.path == entry.path

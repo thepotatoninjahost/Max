@@ -210,8 +210,17 @@ class MaxSystem private constructor(val context: Context) {
                     sandbox.initialize()
                     voiceEngine.initialize()
                     modelManager.scan()
-                    networkGuard.recallInternet()
-                    
+
+                    // Restore the persisted "primary" slot so the user's
+                    // last assignment survives app restarts. Without this,
+                    // SET PRI looks broken because the wrapper isn't reloaded.
+                    val (everydayPath, _) = modelManager.loadSlotConfig()
+                    if (everydayPath != null) {
+                        modelManager.getModelByPath(everydayPath)?.let { entry ->
+                            modelManager.loadSlot(ModelManager.Slot.EVERYDAY, entry)
+                        }
+                    }
+
                     selfCorrectionMachine.agentLoop = agentLoop
                     selfCorrectionMachine.modelManager = modelManager
                     

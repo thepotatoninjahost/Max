@@ -1,57 +1,53 @@
 package com.max.agent.ui
 
-import androidx.compose.foundation.isSystemInDarkTheme
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.darkColorScheme
-import androidx.compose.material3.lightColorScheme
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.graphics.Color
 
-private val DarkColors = darkColorScheme(
-    primary = Color(0xFF8AB4F8),
-    onPrimary = Color(0xFF003258),
-    primaryContainer = Color(0xFF00497D),
-    onPrimaryContainer = Color(0xFFD2E4FF),
-    secondary = Color(0xFFBDC6DC),
-    onSecondary = Color(0xFF273141),
-    secondaryContainer = Color(0xFF3D4758),
-    onSecondaryContainer = Color(0xFFD9E2F8),
-    surface = Color(0xFF1A1C1E),
-    onSurface = Color(0xFFE2E2E6),
-    background = Color(0xFF1A1C1E),
-    onBackground = Color(0xFFE2E2E6),
-    error = Color(0xFFFFB4AB),
-    onError = Color(0xFF690005),
-    surfaceVariant = Color(0xFF43474E),
-    onSurfaceVariant = Color(0xFFC3C7CF),
-)
+/**
+ * Supervillain palette pushed into Material 3 tokens so dialogs, menus,
+ * snackbars, and text fields inherit the same dark/gloomy mood as the
+ * Compose surfaces. We force dark theme — there is no light mode.
+ */
+private val SupervillainScheme = darkColorScheme(
+    primary             = Color(0xFF39FF14),   // toxic neon green
+    onPrimary           = Color(0xFF000000),
+    primaryContainer    = Color(0xFF0A2E00),
+    onPrimaryContainer  = Color(0xFF39FF14),
 
-private val LightColors = lightColorScheme(
-    primary = Color(0xFF00639B),
-    onPrimary = Color.White,
-    primaryContainer = Color(0xFFD2E4FF),
-    onPrimaryContainer = Color(0xFF001D36),
-    secondary = Color(0xFF545F71),
-    onSecondary = Color.White,
-    secondaryContainer = Color(0xFFD9E2F8),
-    onSecondaryContainer = Color(0xFF111C2B),
-    surface = Color(0xFFFDFBFF),
-    onSurface = Color(0xFF1A1C1E),
-    background = Color(0xFFFDFBFF),
-    onBackground = Color(0xFF1A1C1E),
-    error = Color(0xFFBA1A1A),
-    onError = Color.White,
-    surfaceVariant = Color(0xFFDFE2EB),
-    onSurfaceVariant = Color(0xFF43474E),
+    secondary           = Color(0xFF9D00FF),   // venom purple
+    onSecondary         = Color(0xFF000000),
+    secondaryContainer  = Color(0xFF2A0040),
+    onSecondaryContainer= Color(0xFFC78AFF),
+
+    tertiary            = Color(0xFFFF6B00),   // hazard orange
+    onTertiary          = Color(0xFF000000),
+    tertiaryContainer   = Color(0xFF3A1700),
+    onTertiaryContainer = Color(0xFFFFB78A),
+
+    error               = Color(0xFF8B0000),   // blood red
+    onError             = Color(0xFFFFD4D4),
+    errorContainer      = Color(0xFF4A0000),
+    onErrorContainer    = Color(0xFFFF8A8A),
+
+    background          = Color(0xFF000000),
+    onBackground        = Color(0xFFC8C8C8),
+    surface             = Color(0xFF0A080C),   // slight purple-tinted black
+    onSurface           = Color(0xFFC8C8C8),
+    surfaceVariant      = Color(0xFF1A141F),
+    onSurfaceVariant    = Color(0xFF8A8A8A),
+    outline             = Color(0xFF2A2A2A),
+    outlineVariant      = Color(0xFF1A141F),
 )
 
 @Composable
 fun MaxTheme(
-    darkTheme: Boolean = isSystemInDarkTheme(),
+    @Suppress("UNUSED_PARAMETER") darkTheme: Boolean = true,
     content: @Composable () -> Unit
 ) {
     MaterialTheme(
-        colorScheme = if (darkTheme) DarkColors else LightColors,
+        colorScheme = SupervillainScheme,
         content = content
     )
 }

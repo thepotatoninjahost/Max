@@ -202,6 +202,11 @@ class ModelManager(private val context: Context) {
         )
     }
 
+    fun getModelByPath(path: String?): ModelEntry? {
+        if (path.isNullOrBlank()) return null
+        return _available.value.firstOrNull { it.path == path }
+    }
+
     fun getCoderEntry()    = getSlotEntry(Slot.CODER)
     fun getEverydayEntry() = getSlotEntry(Slot.EVERYDAY)
 
