@@ -103,48 +103,104 @@ class ModelManager(private val context: Context) {
     private val pluginCascade = listOf("cpu", "gpu", "npu")
 
     fun loadSlot(slot: Slot, entry: ModelEntry, onComplete: (Boolean) -> Unit = {}) {
-        // Baton Pass: Release the competing slot to prevent LMKD out-of-memory crash
+        // Baton-pass: free the other slot first so LMKD doesn't kill us on big models.
         if (slot == Slot.EVERYDAY) releaseSlot(Slot.CODER) else releaseSlot(Slot.EVERYDAY)
 
         val stateFlow = if (slot == Slot.EVERYDAY) _everydayState else _coderState
         stateFlow.value = ModelState(isLoading = true, loadedModel = entry)
+
         scope.launch {
             val file = File(entry.path)
+            val diag = buildString {
+                append("path=${entry.path}, ")
+                append("exists=${file.exists()}, ")
+                append("readable=${runCatching { file.canRead() }.getOrDefault(false)}, ")
+                append("size=${runCatching { file.length() }.getOrDefault(-1L)}B, ")
+                append("magic=${runCatching {
+                    file.inputStream().use { stream ->
+                        val buf = ByteArray(4)
+                        stream.read(buf)
+                        String(buf, Charsets.US_ASCII)
+                    }
+                }.getOrDefault("?")}")
+            }
+            android.util.Log.d("ModelManager", "loadSlot diag: $diag")
+
             if (!file.exists()) {
-                stateFlow.value = ModelState(error = "File missing: ${entry.path}")
+                stateFlow.value = ModelState(error = "File missing — $diag")
                 onComplete(false); return@launch
             }
-            LlmWrapper.builder()
-                .llmCreateInput(LlmCreateInput(
-                    model_name  = "",
-                    model_path  = file.absolutePath,
-                    config      = ModelConfig(nCtx = 2048, nGpuLayers = 0, max_tokens = 2048),
-                    plugin_id   = pluginCascade.firstOrNull { plugin ->
-                        try {
-                            LlmWrapper.builder().llmCreateInput(LlmCreateInput(
+            if (!file.canRead()) {
+                stateFlow.value = ModelState(error = "File not readable by app (scoped-storage?) — $diag")
+                onComplete(false); return@launch
+            }
+            // GGUF magic is "GGUF" (0x47475546). If the magic is wrong the loader will
+            // always fail, regardless of plugin, with an opaque native code.
+            val gotMagic = runCatching {
+                file.inputStream().use { stream ->
+                    val buf = ByteArray(4); stream.read(buf); String(buf, Charsets.US_ASCII)
+                }
+            }.getOrDefault("?")
+            if (gotMagic != "GGUF") {
+                stateFlow.value = ModelState(
+                    error = "Not a valid GGUF file (header=\"$gotMagic\"). Nexa SDK only loads GGUF. $diag"
+                )
+                onComplete(false); return@launch
+            }
+
+            // Real cascade. Try CPU first (universal), then GPU, then NPU as opportunistic upgrade.
+            // Stop on first success. If all fail, surface the LAST exception's class+message
+            // along with every attempt made.
+            val attempts = mutableListOf<String>()
+            var lastErr: Throwable? = null
+            var loaded: LlmWrapper? = null
+
+            for (plugin in pluginCascade) {
+                android.util.Log.d("ModelManager", "loadSlot: trying plugin=$plugin")
+                val result = runCatching {
+                    LlmWrapper.builder()
+                        .llmCreateInput(
+                            LlmCreateInput(
                                 model_name = "",
                                 model_path = file.absolutePath,
                                 config = ModelConfig(nCtx = 2048, nGpuLayers = 0, max_tokens = 2048),
                                 plugin_id = plugin,
                                 device_id = null
-                            )).build()
-                        } catch (_: Exception) {
-                            false
-                        }
-                        true
-                    } ?: pluginCascade.first(),
-                    device_id   = null
-                )).build()
-                .onSuccess { w ->
-                    if (slot == Slot.EVERYDAY) everydayWrapper = w
-                    else coderWrapper = w
-                    stateFlow.value = ModelState(isLoaded = true, loadedModel = entry)
-                    onComplete(true)
-                }
-                .onFailure { e ->
-                    stateFlow.value = ModelState(error = "Load failed: ${e.message}")
-                    onComplete(false)
-                }
+                            )
+                        )
+                        .build()
+                }.getOrElse { Result.failure(it) }
+
+                result
+                    .onSuccess { w ->
+                        loaded = w
+                        attempts.add("$plugin=OK")
+                    }
+                    .onFailure { e ->
+                        attempts.add("$plugin=${e.javaClass.simpleName}:${e.message?.take(80)}")
+                        lastErr = e
+                        android.util.Log.w("ModelManager", "loadSlot: plugin=$plugin failed", e)
+                    }
+
+                if (loaded != null) break
+            }
+
+            val wrapper = loaded
+            if (wrapper != null) {
+                if (slot == Slot.EVERYDAY) everydayWrapper = wrapper
+                else coderWrapper = wrapper
+                stateFlow.value = ModelState(isLoaded = true, loadedModel = entry)
+                onComplete(true)
+            } else {
+                val cls = lastErr?.javaClass?.simpleName ?: "Unknown"
+                val msg = lastErr?.message ?: "no message"
+                stateFlow.value = ModelState(
+                    error = "All plugins failed [${attempts.joinToString(", ")}]. " +
+                            "Last: $cls — $msg. $diag",
+                    loadedModel = entry
+                )
+                onComplete(false)
+            }
         }
     }
 
