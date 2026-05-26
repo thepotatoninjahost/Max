@@ -56,6 +56,9 @@ android {
                 "/META-INF/INDEX.LIST"
             )
         }
+        jniLibs {
+            useLegacyPackaging = true
+        }
     }
 }
 

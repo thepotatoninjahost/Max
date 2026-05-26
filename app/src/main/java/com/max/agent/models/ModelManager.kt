@@ -100,6 +100,8 @@ class ModelManager(private val context: Context) {
     private var everydayWrapper: LlmWrapper? = null
     private var coderWrapper: LlmWrapper? = null
 
+    private val pluginCascade = listOf("cpu", "gpu", "npu")
+
     fun loadSlot(slot: Slot, entry: ModelEntry, onComplete: (Boolean) -> Unit = {}) {
         // Baton Pass: Release the competing slot to prevent LMKD out-of-memory crash
         if (slot == Slot.EVERYDAY) releaseSlot(Slot.CODER) else releaseSlot(Slot.EVERYDAY)
@@ -117,7 +119,20 @@ class ModelManager(private val context: Context) {
                     model_name  = "",
                     model_path  = file.absolutePath,
                     config      = ModelConfig(nCtx = 2048, nGpuLayers = 0, max_tokens = 2048),
-                    plugin_id   = "cpu_gpu",
+                    plugin_id   = pluginCascade.firstOrNull { plugin ->
+                        try {
+                            LlmWrapper.builder().llmCreateInput(LlmCreateInput(
+                                model_name = "",
+                                model_path = file.absolutePath,
+                                config = ModelConfig(nCtx = 2048, nGpuLayers = 0, max_tokens = 2048),
+                                plugin_id = plugin,
+                                device_id = null
+                            )).build()
+                        } catch (_: Exception) {
+                            false
+                        }
+                        true
+                    } ?: pluginCascade.first(),
                     device_id   = null
                 )).build()
                 .onSuccess { w ->
