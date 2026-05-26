@@ -75,10 +75,33 @@ class TerminalEngine(private val context: Context) {
                     withContext(Dispatchers.IO) {
                         // UPGRADE: Launch an interactive naked shell and feed complex multi-line AI scripts via STDIN. 
                         // This bypasses Android mksh parsing failures and truncation limits of the "-c" argument flag.
-                        process = ProcessBuilder("sh")
+                        // Resolve absolute shell path. The Android app environment has no useful PATH
+                        // by default, so `ProcessBuilder("sh")` may fail to locate the shell.
+                        val shellPath = listOf("/system/bin/sh", "/system/xbin/sh")
+                            .firstOrNull { java.io.File(it).canExecute() } ?: "sh"
+
+                        val builder = ProcessBuilder(shellPath)
                             .directory(context.filesDir)
                             .redirectErrorStream(false)
-                            .start()
+
+                        // Inject a usable POSIX environment. Without these, most commands
+                        // (mktemp, awk, sed pipelines, etc.) silently fail with cryptic errors.
+                        val env = builder.environment()
+                        val existingPath = env["PATH"].orEmpty()
+                        val basePath = "/system/bin:/system/xbin:/vendor/bin:/product/bin"
+                        val nativeLib = runCatching { context.applicationInfo.nativeLibraryDir }.getOrNull()
+                        env["PATH"] = listOfNotNull(
+                            existingPath.takeIf { it.isNotBlank() },
+                            basePath,
+                            nativeLib
+                        ).joinToString(":")
+                        env["HOME"] = context.filesDir.absolutePath
+                        env["TMPDIR"] = context.cacheDir.absolutePath
+                        env["LANG"] = "C.UTF-8"
+                        env["TERM"] = "dumb"
+                        env["PWD"] = context.filesDir.absolutePath
+
+                        process = builder.start()
 
                         val p = process!!
                         

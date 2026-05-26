@@ -694,6 +694,145 @@ private fun SystemTab(max: MaxSystem) {
             }
         }
 
+        item {
+            var token by remember { mutableStateOf("") }
+            var owner by remember { mutableStateOf("") }
+            var repo by remember { mutableStateOf("") }
+            var branch by remember { mutableStateOf("main") }
+            var configured by remember { mutableStateOf(max.githubEngine.isConfigured()) }
+            var status by remember { mutableStateOf<String?>(null) }
+
+            LaunchedEffect(Unit) {
+                max.githubEngine.config()?.let { c ->
+                    owner = c.owner
+                    repo = c.repo
+                    branch = c.branch
+                }
+            }
+
+            Column(modifier = Modifier.border(1.dp, GhostDim, CutCornerShape(4.dp)).padding(16.dp).fillMaxWidth()) {
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    MatrixText("GITHUB UPLINK (SELF-MOD)", GhostWhite, 12, FontWeight.Bold)
+                    Spacer(Modifier.weight(1f))
+                    MatrixText(
+                        if (configured) "● LINKED" else "○ UNLINKED",
+                        if (configured) CyanCore else AlertRed,
+                        10,
+                        FontWeight.Bold
+                    )
+                }
+                Spacer(Modifier.height(8.dp))
+                MatrixText(
+                    "Personal Access Token with repo + workflow scopes. Stored encrypted via Android Keystore.",
+                    GhostDim,
+                    10
+                )
+                Spacer(Modifier.height(8.dp))
+                OutlinedTextField(
+                    value = token,
+                    onValueChange = { token = it },
+                    label = { MatrixText(if (configured) "TOKEN (leave blank to keep current)" else "PAT TOKEN", GhostDim, 10) },
+                    singleLine = true,
+                    visualTransformation = androidx.compose.ui.text.input.PasswordVisualTransformation(),
+                    modifier = Modifier.fillMaxWidth(),
+                    colors = androidx.compose.material3.OutlinedTextFieldDefaults.colors(
+                        focusedTextColor = GhostWhite,
+                        unfocusedTextColor = GhostWhite,
+                        focusedBorderColor = CyanCore,
+                        unfocusedBorderColor = GhostDim,
+                        cursorColor = CyanCore
+                    )
+                )
+                Spacer(Modifier.height(8.dp))
+                OutlinedTextField(
+                    value = owner,
+                    onValueChange = { owner = it },
+                    label = { MatrixText("OWNER (e.g. thepotatoninjahost)", GhostDim, 10) },
+                    singleLine = true,
+                    modifier = Modifier.fillMaxWidth(),
+                    colors = androidx.compose.material3.OutlinedTextFieldDefaults.colors(
+                        focusedTextColor = GhostWhite,
+                        unfocusedTextColor = GhostWhite,
+                        focusedBorderColor = CyanCore,
+                        unfocusedBorderColor = GhostDim,
+                        cursorColor = CyanCore
+                    )
+                )
+                Spacer(Modifier.height(8.dp))
+                OutlinedTextField(
+                    value = repo,
+                    onValueChange = { repo = it },
+                    label = { MatrixText("REPO (e.g. Max)", GhostDim, 10) },
+                    singleLine = true,
+                    modifier = Modifier.fillMaxWidth(),
+                    colors = androidx.compose.material3.OutlinedTextFieldDefaults.colors(
+                        focusedTextColor = GhostWhite,
+                        unfocusedTextColor = GhostWhite,
+                        focusedBorderColor = CyanCore,
+                        unfocusedBorderColor = GhostDim,
+                        cursorColor = CyanCore
+                    )
+                )
+                Spacer(Modifier.height(8.dp))
+                OutlinedTextField(
+                    value = branch,
+                    onValueChange = { branch = it },
+                    label = { MatrixText("BRANCH", GhostDim, 10) },
+                    singleLine = true,
+                    modifier = Modifier.fillMaxWidth(),
+                    colors = androidx.compose.material3.OutlinedTextFieldDefaults.colors(
+                        focusedTextColor = GhostWhite,
+                        unfocusedTextColor = GhostWhite,
+                        focusedBorderColor = CyanCore,
+                        unfocusedBorderColor = GhostDim,
+                        cursorColor = CyanCore
+                    )
+                )
+                Spacer(Modifier.height(12.dp))
+                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    WireframeButton(
+                        if (configured && token.isBlank()) "RE-LINK (KEEP TOKEN)" else "LINK",
+                        if (configured) CyanCore else WarningYellow,
+                        {
+                            scope.launch {
+                                val effectiveToken = if (token.isBlank() && configured)
+                                    max.githubEngine.config()?.token.orEmpty()
+                                else token
+                                if (effectiveToken.isBlank() || owner.isBlank() || repo.isBlank()) {
+                                    status = "× All fields required"
+                                } else {
+                                    max.githubEngine.configure(effectiveToken, owner.trim(), repo.trim(), branch.trim().ifBlank { "main" })
+                                    configured = max.githubEngine.isConfigured()
+                                    status = if (configured) "✓ Linked. Max can now self-modify." else "× Link failed"
+                                    token = ""
+                                }
+                            }
+                        },
+                        Modifier.weight(1f)
+                    )
+                    if (configured) {
+                        WireframeButton(
+                            "UNLINK",
+                            AlertRed,
+                            {
+                                scope.launch {
+                                    max.githubEngine.configure("", "", "", "main")
+                                    configured = false
+                                    owner = ""; repo = ""; branch = "main"
+                                    status = "Unlinked."
+                                }
+                            },
+                            Modifier.weight(1f)
+                        )
+                    }
+                }
+                status?.let {
+                    Spacer(Modifier.height(8.dp))
+                    MatrixText(it, if (it.startsWith("×")) AlertRed else CyanCore, 10)
+                }
+            }
+        }
+
         // Restored Audio and Display controls
         item {
             Column(modifier = Modifier.border(1.dp, GhostDim, CutCornerShape(4.dp)).padding(16.dp).fillMaxWidth()) {
