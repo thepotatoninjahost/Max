@@ -71,7 +71,7 @@ val CyanCore       = Color(0xFF39FF14)   // toxic neon green (primary accent)
 val AlertRed       = Color(0xFF8B0000)   // blood red (danger / destructive)
 val WarningYellow  = Color(0xFFFF6B00)   // hazard orange (warn / caution)
 val VenomPurple    = Color(0xFF9D00FF)   // venom purple (secondary accent)
-val GhostWhite     = Color(0xFFC8C8C8)   // primary text — dimmed for gloom
+val GhostWhite     = Color(0xFFEAEAE6)   // primary text — dimmed for gloom
 val GhostDim       = Color(0xFF2A2A2A)   // borders / muted text
 
 val MatrixFont = FontFamily.Monospace
@@ -400,7 +400,11 @@ private fun ChatTab(max: MaxSystem) {
         if (granted) sendRef.value?.let { send -> max.voiceEngine.startListening({ send(it) }) }
     }
 
-    LaunchedEffect(messages.size) { if (messages.isNotEmpty()) listState.animateScrollToItem(messages.size - 1) }
+    LaunchedEffect(Unit) {
+        if (messages.isNotEmpty()) listState.animateScrollToItem(messages.size - 1)
+    }
+    LaunchedEffect(messages.size) {
+    }
 
     fun sendMessage(text: String) {
         if (text.isBlank() || isGenerating) return
