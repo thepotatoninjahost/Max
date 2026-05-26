@@ -198,6 +198,11 @@ class MaxSystem private constructor(val context: Context) {
 
     fun initialize() {
         _systemState.value = SystemState.Initializing
+        runCatching {
+            com.nexa.sdk.NexaSdk.getInstance().init(context.applicationContext)
+        }.onFailure {
+            android.util.Log.w("MaxSystem", "NexaSdk.init() threw — model loads may fail", it)
+        }
         MaxIdentity.init(context.filesDir)
         failureDetector.installCrashHandler()
         

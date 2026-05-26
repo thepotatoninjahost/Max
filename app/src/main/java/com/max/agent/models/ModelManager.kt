@@ -100,7 +100,6 @@ class ModelManager(private val context: Context) {
     private var everydayWrapper: LlmWrapper? = null
     private var coderWrapper: LlmWrapper? = null
 
-    private val pluginCascade = listOf("cpu", "gpu", "npu")
 
     fun loadSlot(slot: Slot, entry: ModelEntry, onComplete: (Boolean) -> Unit = {}) {
         // Baton-pass: free the other slot first so LMKD doesn't kill us on big models.
@@ -110,95 +109,100 @@ class ModelManager(private val context: Context) {
         stateFlow.value = ModelState(isLoading = true, loadedModel = entry)
 
         scope.launch {
+            // ---- Pre-flight diagnostics ----
+            // Capture every detail the Nexa native loader cares about so
+            // failures surface with actionable information.
             val file = File(entry.path)
             val diag = buildString {
-                append("path=${entry.path}, ")
-                append("exists=${file.exists()}, ")
-                append("readable=${runCatching { file.canRead() }.getOrDefault(false)}, ")
-                append("size=${runCatching { file.length() }.getOrDefault(-1L)}B, ")
-                append("magic=${runCatching {
-                    file.inputStream().use { stream ->
-                        val buf = ByteArray(4)
-                        stream.read(buf)
-                        String(buf, Charsets.US_ASCII)
-                    }
-                }.getOrDefault("?")}")
-            }
-            android.util.Log.d("ModelManager", "loadSlot diag: $diag")
-
-            if (!file.exists()) {
-                stateFlow.value = ModelState(error = "File missing — $diag")
-                onComplete(false); return@launch
-            }
-            if (!file.canRead()) {
-                stateFlow.value = ModelState(error = "File not readable by app (scoped-storage?) — $diag")
-                onComplete(false); return@launch
-            }
-            // GGUF magic is "GGUF" (0x47475546). If the magic is wrong the loader will
-            // always fail, regardless of plugin, with an opaque native code.
-            val gotMagic = runCatching {
-                file.inputStream().use { stream ->
-                    val buf = ByteArray(4); stream.read(buf); String(buf, Charsets.US_ASCII)
-                }
-            }.getOrDefault("?")
-            if (gotMagic != "GGUF") {
-                stateFlow.value = ModelState(
-                    error = "Not a valid GGUF file (header=\"$gotMagic\"). Nexa SDK only loads GGUF. $diag"
-                )
-                onComplete(false); return@launch
+                append("path=").append(entry.path)
+                append(", exists=").append(file.exists())
+                append(", readable=").append(file.canRead())
+                append(", size=").append(if (file.exists()) file.length() else -1L).append('B')
+                // GGUF magic check — first 4 bytes should spell "GGUF".
+                val magic = runCatching {
+                    file.inputStream().use { it.readNBytes(4).toString(Charsets.US_ASCII) }
+                }.getOrElse { "<read-failed:${it.javaClass.simpleName}>" }
+                append(", magic=").append(magic)
             }
 
-            // Real cascade. Try CPU first (universal), then GPU, then NPU as opportunistic upgrade.
-            // Stop on first success. If all fail, surface the LAST exception's class+message
-            // along with every attempt made.
+            if (!file.exists() || !file.canRead()) {
+                stateFlow.value = ModelState(error = "Model file unreachable. $diag")
+                onComplete(false)
+                return@launch
+            }
+
+            // ---- Canonical Nexa GGUF LLM load ----
+            // Per https://docs.nexa.ai/en/nexa-sdk-android/APIReference_CPUGPU:
+            //   plugin_id = "cpu_gpu"   for any community GGUF model
+            //   model_name = ""         for CPU/GPU (only NPU needs a name)
+            //   device_id = null        for CPU
+            //   nGpuLayers = 0          for CPU; 999 to offload all layers to GPU
+            //
+            // We try CPU first (universal). If the device has Adreno GPU, we can
+            // later expose a setting to upgrade. For now CPU is the only reliable
+            // path across all ARM64-v8a devices.
             val attempts = mutableListOf<String>()
-            var lastErr: Throwable? = null
-            var loaded: LlmWrapper? = null
+            var lastError: Throwable? = null
+            var wrapper: LlmWrapper? = null
 
-            for (plugin in pluginCascade) {
-                android.util.Log.d("ModelManager", "loadSlot: trying plugin=$plugin")
-                val result = runCatching {
-                    LlmWrapper.builder()
+            val attemptConfigs = listOf(
+                Triple<String, String?, Int>("cpu_gpu", null,  0),     // CPU
+                Triple<String, String?, Int>("cpu_gpu", "gpu", 999),   // GPU (Adreno)
+                Triple<String, String?, Int>("cpu_gpu", "dev0", 999)   // Hexagon NPU (GGML backend)
+            )
+
+            for ((pluginId, deviceId, gpuLayers) in attemptConfigs) {
+                val attemptLabel = "plugin=$pluginId,device=${deviceId ?: "cpu"},gpuLayers=$gpuLayers"
+                try {
+                    val result = LlmWrapper.builder()
                         .llmCreateInput(
                             LlmCreateInput(
-                                model_name = "",
-                                model_path = file.absolutePath,
-                                config = ModelConfig(nCtx = 2048, nGpuLayers = 0, max_tokens = 2048),
-                                plugin_id = plugin,
-                                device_id = null
+                                model_name  = "",
+                                model_path  = entry.path,
+                                config      = ModelConfig(
+                                    nCtx        = 4096,
+                                    nGpuLayers  = gpuLayers,
+                                    max_tokens  = 2048
+                                ),
+                                plugin_id   = pluginId,
+                                device_id   = deviceId
                             )
                         )
                         .build()
-                }.getOrElse { Result.failure(it) }
 
-                result
-                    .onSuccess { w ->
-                        loaded = w
-                        attempts.add("$plugin=OK")
-                    }
-                    .onFailure { e ->
-                        attempts.add("$plugin=${e.javaClass.simpleName}:${e.message?.take(80)}")
-                        lastErr = e
-                        android.util.Log.w("ModelManager", "loadSlot: plugin=$plugin failed", e)
-                    }
+                    var success = false
+                    result.onSuccess {
+                        wrapper = it
+                        success = true
+                    }.onFailure { lastError = it }
 
-                if (loaded != null) break
+                    if (success) {
+                        attempts.add("$attemptLabel=OK")
+                        break
+                    } else {
+                        attempts.add("$attemptLabel=${lastError?.javaClass?.simpleName}:${lastError?.message}")
+                    }
+                } catch (t: Throwable) {
+                    lastError = t
+                    attempts.add("$attemptLabel=${t.javaClass.simpleName}:${t.message}")
+                }
             }
 
-            val wrapper = loaded
-            if (wrapper != null) {
-                if (slot == Slot.EVERYDAY) everydayWrapper = wrapper
-                else coderWrapper = wrapper
-                stateFlow.value = ModelState(isLoaded = true, loadedModel = entry)
+            val w = wrapper
+            if (w != null) {
+                if (slot == Slot.EVERYDAY) everydayWrapper = w else coderWrapper = w
+                stateFlow.value = ModelState(
+                    isLoaded   = true,
+                    loadedModel = entry,
+                    error      = null
+                )
+                android.util.Log.i("ModelManager", "Loaded $slot: ${entry.name} via ${attempts.last()}")
                 onComplete(true)
             } else {
-                val cls = lastErr?.javaClass?.simpleName ?: "Unknown"
-                val msg = lastErr?.message ?: "no message"
-                stateFlow.value = ModelState(
-                    error = "All plugins failed [${attempts.joinToString(", ")}]. " +
-                            "Last: $cls — $msg. $diag",
-                    loadedModel = entry
-                )
+                val errLine = "All attempts failed [${attempts.joinToString("; ")}]. " +
+                              "Last: ${lastError?.javaClass?.simpleName}: ${lastError?.message}. $diag"
+                android.util.Log.e("ModelManager", errLine, lastError)
+                stateFlow.value = ModelState(error = errLine)
                 onComplete(false)
             }
         }
