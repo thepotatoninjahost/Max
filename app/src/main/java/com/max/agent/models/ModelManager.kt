@@ -120,7 +120,11 @@ class ModelManager(private val context: Context) {
                 append(", size=").append(if (file.exists()) file.length() else -1L).append('B')
                 // GGUF magic check — first 4 bytes should spell "GGUF".
                 val magic = runCatching {
-                    file.inputStream().use { it.readNBytes(4).toString(Charsets.US_ASCII) }
+                    file.inputStream().use {
+                        val buf = ByteArray(4)
+                        val n = it.read(buf)
+                        if (n > 0) String(buf, 0, n, Charsets.US_ASCII) else "<empty>"
+                    }
                 }.getOrElse { "<read-failed:${it.javaClass.simpleName}>" }
                 append(", magic=").append(magic)
             }
