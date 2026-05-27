@@ -135,24 +135,26 @@ class ModelManager(private val context: Context) {
                 return@launch
             }
 
-            // ---- Canonical Nexa GGUF LLM load ----
-            // Per https://docs.nexa.ai/en/nexa-sdk-android/APIReference_CPUGPU:
-            //   plugin_id = "cpu_gpu"   for any community GGUF model
-            //   model_name = ""         for CPU/GPU (only NPU needs a name)
-            //   device_id = null        for CPU
-            //   nGpuLayers = 0          for CPU; 999 to offload all layers to GPU
+            // ---- Nexa GGUF LLM load — GPU/NPU ONLY ----
+            // Per https://docs.nexa.ai/en/nexa-sdk-android/APIReference_CPUGPU
+            // and master's hardware policy:
+            //   plugin_id  = "cpu_gpu"   (GGML backend — the only one that accepts GGUF)
+            //   device_id  = "dev0"      Hexagon NPU (Snapdragon 8 Elite / Gen 3+)
+            //   device_id  = "gpu"       Adreno GPU via OpenCL
+            //   nGpuLayers = 999         ALL layers offloaded — no CPU spill
             //
-            // We try CPU first (universal). If the device has Adreno GPU, we can
-            // later expose a setting to upgrade. For now CPU is the only reliable
-            // path across all ARM64-v8a devices.
+            // CPU is explicitly forbidden. If both accelerated paths fail the
+            // model is refused outright instead of silently degrading.
             val attempts = mutableListOf<String>()
             var lastError: Throwable? = null
             var wrapper: LlmWrapper? = null
 
+            // ── HARDWARE POLICY: NPU/GPU only. CPU is FORBIDDEN. ──
+            // Per master directive: Max runs on Hexagon NPU or Adreno GPU only.
+            // If neither accepts the model, refuse to load rather than crawl on CPU.
             val attemptConfigs = listOf(
-                Triple<String, String?, Int>("cpu_gpu", null,  0),     // CPU
-                Triple<String, String?, Int>("cpu_gpu", "gpu", 999),   // GPU (Adreno)
-                Triple<String, String?, Int>("cpu_gpu", "dev0", 999)   // Hexagon NPU (GGML backend)
+                Triple<String, String?, Int>("cpu_gpu", "dev0", 999),  // Hexagon NPU first (Snapdragon 8 Elite)
+                Triple<String, String?, Int>("cpu_gpu", "gpu",  999)   // Adreno GPU via OpenCL fallback
             )
 
             for ((pluginId, deviceId, gpuLayers) in attemptConfigs) {
@@ -203,7 +205,8 @@ class ModelManager(private val context: Context) {
                 android.util.Log.i("ModelManager", "Loaded $slot: ${entry.name} via ${attempts.last()}")
                 onComplete(true)
             } else {
-                val errLine = "All attempts failed [${attempts.joinToString("; ")}]. " +
+                val errLine = "Accelerator refused model (no CPU fallback by policy). " +
+                              "Attempts: [${attempts.joinToString("; ")}]. " +
                               "Last: ${lastError?.javaClass?.simpleName}: ${lastError?.message}. $diag"
                 android.util.Log.e("ModelManager", errLine, lastError)
                 stateFlow.value = ModelState(error = errLine)

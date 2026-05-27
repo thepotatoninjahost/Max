@@ -41,6 +41,7 @@ class AgentLoop(
             modelManager.generateStreamFlowForSlot(ModelManager.Slot.EVERYDAY, prompt).collect { res ->
                 if (res is LlmStreamResult.Token) {
                     responseBuilder.append(res.text)
+                    onToken?.invoke(res.text)
                     if (responseBuilder.length > 2000) {
                         modelManager.stopSlotStream(ModelManager.Slot.EVERYDAY)
                     }
@@ -56,7 +57,9 @@ class AgentLoop(
                 break
             }
 
+            onStep?.invoke("[action] ${actionParsed!!.type}")
             val result = agency.executeAction(actionParsed!!)
+            onStep?.invoke(if (result.success) "[ok] ${result.output.take(120)}" else "[fail] ${result.error}")
             
             // LOUD FAILURE: If it's fatal, kill the loop immediately.
             if (result.isFatal) {

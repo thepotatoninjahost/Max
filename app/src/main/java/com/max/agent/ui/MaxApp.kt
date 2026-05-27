@@ -414,7 +414,21 @@ private fun ChatTab(max: MaxSystem) {
         val replyIdx = messages.size
         messages.add(MaxSystem.UiMessage("assistant", "…"))
         isGenerating = true; max.isGenerating = true
-        max.agentLoop.onToken = null; max.agentLoop.onStep = null
+        // Stream tokens live into the assistant bubble instead of waiting for the full reply.
+        val liveBuffer = StringBuilder()
+        max.agentLoop.onToken = { token ->
+            liveBuffer.append(token)
+            scope.launch(Dispatchers.Main) {
+                if (replyIdx < messages.size) {
+                    messages[replyIdx] = messages[replyIdx].copy(content = liveBuffer.toString())
+                }
+            }
+        }
+        max.agentLoop.onStep = { step ->
+            scope.launch(Dispatchers.Main) {
+                messages.add(MaxSystem.UiMessage("system", step))
+            }
+        }
 
         generationJob = scope.launch(Dispatchers.IO) {
             try {
