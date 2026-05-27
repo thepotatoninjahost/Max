@@ -193,7 +193,7 @@ class ScriptingEngine(private val context: Context) {
         scope: org.mozilla.javascript.Scriptable,
         name: String,
         value: Any,
-        cx: org.mozilla.javascript.Context
+        @Suppress("UNUSED_PARAMETER") cx: org.mozilla.javascript.Context
     ) {
         ScriptableObject.putProperty(scope, name,
             org.mozilla.javascript.Context.javaToJS(value, scope))

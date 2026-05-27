@@ -134,7 +134,9 @@ class PermissionGate {
         timeoutMs: Long = 2 * 60 * 1000L
     ): Outcome {
         if (lockdown) return Outcome.LOCKED_DOWN
-        requestPermission(action, reason, riskLevel, details, isCritical)
+        // Tag requestedBy onto the request details so the audit trail surfaces who asked.
+        val taggedDetails = if (details.isBlank()) "by:$requestedBy" else "by:$requestedBy — $details"
+        requestPermission(action, reason, riskLevel, taggedDetails, isCritical)
         val settled = withTimeoutOrNull(timeoutMs) {
             _state.first { s ->
                 s is PermissionState.Approved ||

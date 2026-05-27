@@ -66,11 +66,12 @@ class NetworkStateMonitor(private val context: Context) {
             else -> Transport.NONE
         }
         val validated = caps?.hasCapability(NetworkCapabilities.NET_CAPABILITY_VALIDATED) == true
-        val signalDbm = if (transport == Transport.WIFI) wifiManager.connectionInfo.rssi else 0
-        val ipRaw = wifiManager.connectionInfo.ipAddress
-        val ipAddress = if (ipRaw != 0 && transport == Transport.WIFI) {
-            "%d.%d.%d.%d".format(ipRaw and 0xFF, ipRaw shr 8 and 0xFF, ipRaw shr 16 and 0xFF, ipRaw shr 24 and 0xFF)
-        } else null
+        // Signal: NetworkCapabilities.signalStrength is API 29+ for any transport.
+        val signalDbm = caps?.signalStrength ?: 0
+        // IP: pull from LinkProperties (no WifiManager dependency, works on all transports).
+        val ipAddress = cm.activeNetwork?.let { cm.getLinkProperties(it) }
+            ?.linkAddresses?.firstOrNull { it.address.address.size == 4 }
+            ?.address?.hostAddress
 
         _state.value = Snapshot(
             isConnected = transport != Transport.NONE,

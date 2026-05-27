@@ -191,7 +191,7 @@ class VoiceEngine(
                     }
                 }
                 
-                override fun onError(utteranceId: String?) {
+                @Suppress("OVERRIDE_DEPRECATION") override fun onError(utteranceId: String?) {
                     scope.launch(Dispatchers.Main) {
                         _mode.value = Mode.IDLE
                         _error.value = "TTS Error"

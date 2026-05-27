@@ -18,6 +18,7 @@ import androidx.compose.foundation.text.BasicTextField
 import androidx.compose.foundation.text.KeyboardActions
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.filled.Send
 import androidx.compose.material.icons.filled.*
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
@@ -106,7 +107,7 @@ fun MaxApp(max: MaxSystem) {
     Box(modifier = Modifier.fillMaxSize().background(VoidBlack).imePadding()) {
         when (authState) {
             OwnerAuth.State.NOT_SETUP -> SetupScreen(max.ownerAuth)
-            OwnerAuth.State.LOCKED   -> UnlockScreen(max.ownerAuth, max)
+            OwnerAuth.State.LOCKED   -> UnlockScreen(max.ownerAuth)
             OwnerAuth.State.UNLOCKED -> MaxMainContent(max)
         }
     }
@@ -179,7 +180,7 @@ private fun AbstractInput(label: String, value: String, isPassword: Boolean = fa
 }
 
 @Composable
-private fun UnlockScreen(auth: OwnerAuth, max: MaxSystem) {
+private fun UnlockScreen(auth: OwnerAuth) {
     val activity = LocalContext.current as? androidx.fragment.app.FragmentActivity
     var showPass by remember { mutableStateOf(false) }
     var passInput by remember { mutableStateOf("") }
@@ -518,6 +519,7 @@ private fun ChatTab(max: MaxSystem) {
 @Composable
 private fun ModelsTab(max: MaxSystem) {
     val available by max.modelManager.available.collectAsState()
+    val modelState by max.modelManager.state.collectAsState()
     val transferState by max.modelManager.transfer.collectAsState()
     var urlInput by remember { mutableStateOf("") }
     
