@@ -53,6 +53,18 @@
                 <action android:name="android.intent.action.MAIN" />
                 <category android:name="android.intent.category.LAUNCHER" />
             </intent-filter>
+            <intent-filter>
+                <action android:name="android.intent.action.ASSIST" />
+                <category android:name="android.intent.category.DEFAULT" />
+            </intent-filter>
+            <intent-filter>
+                <action android:name="android.intent.action.VOICE_COMMAND" />
+                <category android:name="android.intent.category.DEFAULT" />
+            </intent-filter>
+            <intent-filter>
+                <action android:name="android.speech.action.VOICE_SEARCH_HANDS_FREE" />
+                <category android:name="android.intent.category.DEFAULT" />
+            </intent-filter>
         </activity>
 
         <service
@@ -96,5 +108,21 @@
             android:exported="true"
             android:permission="android.permission.BIND_VOICE_INTERACTION" />
 
+
+        <!-- Companion RecognitionService — required by Android voice-interaction
+             contract for an app to be listed as a full default assistant. -->
+        <service
+            android:name=".assistant.MaxRecognitionService"
+            android:exported="true"
+            android:label="Max"
+            android:permission="android.permission.RECORD_AUDIO">
+            <intent-filter>
+                <action android:name="android.speech.RecognitionService" />
+                <category android:name="android.intent.category.DEFAULT" />
+            </intent-filter>
+            <meta-data
+                android:name="android.speech"
+                android:resource="@xml/recognition_service" />
+        </service>
     </application>
 </manifest>
