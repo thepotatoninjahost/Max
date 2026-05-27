@@ -67,7 +67,7 @@ class NetworkStateMonitor(private val context: Context) {
         }
         val validated = caps?.hasCapability(NetworkCapabilities.NET_CAPABILITY_VALIDATED) == true
         // Signal: NetworkCapabilities.signalStrength is API 29+ for any transport.
-        val signalDbm = caps?.signalStrength ?: 0
+        val signalDbm = if (caps != null && android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.Q) caps.signalStrength else 0
         // IP: pull from LinkProperties (no WifiManager dependency, works on all transports).
         val ipAddress = cm.activeNetwork?.let { cm.getLinkProperties(it) }
             ?.linkAddresses?.firstOrNull { it.address.address.size == 4 }
