@@ -76,44 +76,85 @@ object MaxIdentity {
     }
 
     fun buildSystemPrompt(): String {
+        // Inject the REAL current date/time at every prompt build so the model can never
+        // hallucinate a fabricated "as of" date from its training cutoff.
+        val now = java.text.SimpleDateFormat("yyyy-MM-dd HH:mm:ss z", java.util.Locale.US)
+            .apply { timeZone = java.util.TimeZone.getDefault() }
+            .format(java.util.Date())
+
         val basePrompt = """
-            You are Max, an elite, autonomous AI agent with the ability to modify your own codebase, execute terminal commands, and interact with the physical device.
-            
-            CRITICAL DIRECTIVES:
-            1. NEVER GUESS, FAKE, OR HALLUCINATE DATA. NEVER LIE.
-            2. If asked to diagnose an issue, retrieve the real data first.
-            3. If asked to fix or modify yourself, you MUST use the Github CI/CD loop to alter your source code, wait for the build, and install the update.
-            
-            To execute any action, you MUST output exactly this JSON format and wait for the system to return the result:
-            <action>
-            {
-              "type": "ACTION_TYPE",
-              "params": {"key": "value"},
-              "risk": "high",
-              "description": "Brief description of what you are doing"
-            }
-            </action>
-            
-            AVAILABLE SYSTEM TOOLS:
-            - SHELL_COMMAND (Params: "cmd" -> string) - Execute raw linux commands.
-            - READ_FILE (Params: "path" -> string) - Read local device files.
-            - WRITE_FILE (Params: "path" -> string, "content" -> string) - Write local device files.
-            
-            AVAILABLE SELF-MODIFICATION TOOLS (Use these to fix your own code):
-            - GITHUB_READ_FILE (Params: "path" -> string) - Read your source code from the repository.
-            - GITHUB_WRITE_FILE (Params: "path" -> string, "content" -> string, "message" -> string) - Commit a code fix to the repository. This triggers an automated build.
-            
-            SELF-FIX PROTOCOL:
-            If you detect an error or are commanded to fix a bug:
-            Step 1: GITHUB_READ_FILE to analyze the broken code.
-            Step 2: GITHUB_WRITE_FILE to commit the corrected code (this also kicks off the GitHub Actions build).
-            Step 3: GITHUB_TRIGGER_BUILD only if a re-run is needed; otherwise poll until the latest run succeeds.
-            Step 4: INSTALL_APK to download and install the rebuilt APK.
-            
-            Execute the action, read the system return data, and THEN formulate your next step or response. Do not output conversational filler while working.
+            You are Max, an autonomous AI agent embedded on the owner's Android phone.
+            The current local date and time is: $now
+            You DO NOT have access to any other date. If you need a time anchor, use this one.
+
+            ╔═══════════════════════════════════════════════════════════════════════╗
+            ║  HARD RULES — VIOLATING ANY OF THESE IS A CRITICAL FAILURE             ║
+            ╠═══════════════════════════════════════════════════════════════════════╣
+            ║ R1. NEVER fabricate data. If you don't know, EXECUTE a tool to find    ║
+            ║     out. Inventing file contents, system status, dates, log lines, or  ║
+            ║     any factual claim is forbidden.                                    ║
+            ║ R2. NEVER mix prose and action JSON in the same reply. Either you      ║
+            ║     respond in plain language OR you emit a single action JSON object  ║
+            ║     and STOP. Never both.                                              ║
+            ║ R3. To run a tool, emit ONE JSON object — wrapped in <action>…</action>║
+            ║     tags is preferred, but bare JSON is also accepted. Example:        ║
+            ║       <action>{"type":"SHELL_COMMAND","params":{"cmd":"uname -a"},     ║
+            ║                "risk":"low","description":"kernel info"}</action>      ║
+            ║ R4. After emitting an action, STOP generating immediately. The system  ║
+            ║     will execute it and feed the result back as the next user turn.    ║
+            ║ R5. If a user asks for a status report, ALWAYS run GET_SYSTEM_STATE    ║
+            ║     or SHELL_COMMAND first. NEVER invent metrics.                      ║
+            ╚═══════════════════════════════════════════════════════════════════════╝
+
+            AVAILABLE TOOLS:
+            • SHELL_COMMAND      params: {"cmd": "<shell cmd>"}
+            • GET_SYSTEM_STATE   params: {}                    — battery, network, ram snapshot
+            • READ_FILE          params: {"path": "<rel path under Max_Core>"}
+            • WRITE_FILE         params: {"path": "...", "content": "..."}
+            • LIST_DIR           params: {"path": "..."}
+            • SET_VOLUME         params: {"pct": "0..100", "stream": "music|ring|alarm|voice|notification"}
+            • SET_BRIGHTNESS     params: {"pct": "0..100"}
+            • OPEN_SETTINGS_PANEL params: {"panel": "wifi|internet|bluetooth|battery|hotspot|nfc"}
+            • RINGER_MODE        params: {"mode": "silent|vibrate|normal"}
+            • TOGGLE_INTERNET    params: {"enable": "true|false"}
+            • LAUNCH_APP         params: {"pkg": "com.example.app"}
+            • SET_VOICE          params: {"gender": "male|female|neutral", "pitch": "1.0", "rate": "1.0"}
+            • EXECUTE_SCRIPT     params: {"script": "<JS source>"}
+            • MODIFY_SYSTEM_PROMPT params: {"text": "..."}
+            • ADD_RULE           params: {"rule": "..."}
+
+            SELF-MODIFICATION TOOLS (use these to fix your own code):
+            • GITHUB_READ_FILE      params: {"path": "<repo path>"}
+            • GITHUB_WRITE_FILE     params: {"path": "...", "content": "...", "message": "..."}
+            • GITHUB_TRIGGER_BUILD  params: {}                  — checks the latest CI run
+            • INSTALL_APK           params: {}                  — installs the latest built APK
+            • HOTSWAP_DEX           params: {"dex": "<path>", "class": "<fully.qualified.Class>"}
+
+            RISK LEVELS — set "risk" honestly. The owner must approve Medium and High.
+            • low    : pure read, status, settings panels, volume/brightness/ringer
+            • medium : WRITE_FILE, EXECUTE_SCRIPT, LAUNCH_APP, TOGGLE_INTERNET, SET_VOICE
+            • high   : SHELL_COMMAND, GITHUB_WRITE_FILE, INSTALL_APK, HOTSWAP_DEX
+
+            SELF-FIX PROTOCOL — when the owner reports a bug in YOU:
+            1. GITHUB_READ_FILE the file you suspect.
+            2. GITHUB_WRITE_FILE the corrected source. This auto-triggers CI.
+            3. GITHUB_TRIGGER_BUILD to poll until the latest run completes successfully.
+            4. INSTALL_APK to download and install the rebuilt APK.
+
+            REMEMBER R2: emit action JSON OR plain text — never both in one turn.
+
+            LIVE CONTEXT — appended below this prompt on EVERY turn:
+            A "=== LIVE PHONE CONTEXT ===" block contains the CURRENT date, time,
+            battery, network, volume, brightness, RAM, storage, and loaded model.
+            For ANY factual question whose answer is in that block, READ IT and
+            answer naturally — do NOT call an action, do NOT guess, do NOT use
+            training-data knowledge. The live context is ground truth.
         """.trimIndent()
 
-        val rulesStr = if (customRules.isEmpty()) "" else "\n\nACTIVE DIRECTIVES:\n" + customRules.joinToString("\n") { "- $it" }
+        val rulesStr = if (customRules.isEmpty()) "" else
+            "\n\nACTIVE DIRECTIVES (added at runtime by the owner):\n" +
+            customRules.joinToString("\n") { "- $it" }
+
         return customPrompt ?: (basePrompt + rulesStr)
     }
     
@@ -245,19 +286,20 @@ class MaxSystem private constructor(val context: Context) {
         }
     }
 
+    /**
+     * Best-effort heartbeat. The previous "watchdog" version tried to spawn a shell
+     * script in /data/local/tmp/, which is forbidden to unprivileged apps on stock
+     * Android — that codepath could never succeed on the user's device. This replacement
+     * writes a UTC timestamp into the app's own filesDir so external tooling (adb,
+     * shizuku, a companion service) can verify Max is alive without root.
+     */
     private fun ensureWatchdog() {
         try {
-            val watchdog = File("/data/local/tmp/max_watchdog.sh")
-            if (!watchdog.exists()) {
-                val content = runBlocking { githubEngine.readSourceFile("scripts/max_watchdog.sh") }
-                if (content != null) {
-                    watchdog.writeText(content)
-                    Runtime.getRuntime().exec("chmod +x /data/local/tmp/max_watchdog.sh")
-                    Runtime.getRuntime().exec("/data/local/tmp/max_watchdog.sh &")
-                }
-            }
+            File(context.filesDir, "heartbeat.txt").writeText(
+                "alive@" + System.currentTimeMillis() + " v" + MaxIdentity.IDENTITY_VERSION
+            )
         } catch (e: Exception) {
-            android.util.Log.e("Max", "Watchdog error: ${e.message}")
+            android.util.Log.w("Max", "heartbeat write failed: ${e.message}")
         }
     }
 
@@ -277,6 +319,44 @@ class MaxSystem private constructor(val context: Context) {
         networkStateMonitor.stopMonitoring()
         modelManager.releaseCurrent()
         voiceEngine.destroy()
+    }
+
+    /**
+     * Live phone snapshot, formatted for direct injection into the system prompt
+     * on every turn so Max can answer factual questions ("what time is it",
+     * "what's my battery", "am I on wifi") instantly from real device state —
+     * without calling an action and without fabricating.
+     */
+    fun captureLiveContext(): String {
+        val now = java.time.ZonedDateTime.now()
+        val date = now.format(java.time.format.DateTimeFormatter.ofPattern("EEEE, MMMM d, yyyy"))
+        val time = now.format(java.time.format.DateTimeFormatter.ofPattern("h:mm a z"))
+        val res = resourceMonitor.state.value
+        val net = networkStateMonitor.state.value
+        val sys = systemController.refresh()
+        val everyday = modelManager.everydayState.value
+        val coder = modelManager.coderState.value
+        val owner = ownerAuth.ownerName()
+        return buildString {
+            appendLine("=== LIVE PHONE CONTEXT — refreshed for this turn ===")
+            appendLine("Owner: ${if (owner.isBlank()) "Owner" else owner}")
+            appendLine("Date:  $date")
+            appendLine("Time:  $time")
+            appendLine("Battery: ${res.batteryPct}% (${if (res.isCharging) "charging" else "on battery"}, ${res.batteryTempC.toInt()}°C)")
+            appendLine("Network: ${if (net.isConnected) net.transportLabel else "OFFLINE"}${if (net.signalDbm != 0) " (${net.signalDbm} dBm)" else ""}")
+            appendLine("Volume: media ${sys.mediaVolumePct}%, ring ${sys.ringVolumePct}%, ringer ${sys.ringerMode}")
+            appendLine("Brightness: ${sys.brightnessPct}%")
+            appendLine("WiFi: ${if (sys.isWifiEnabled) "on" else "off"} | Bluetooth: ${if (sys.isBluetoothEnabled) "on" else "off"} | Power-save: ${if (sys.isPowerSaveMode) "on" else "off"}")
+            appendLine("RAM: ${res.ramUsedMb}/${res.ramTotalMb} MB used (${res.ramUsedPct.toInt()}%)")
+            appendLine("Storage free: ${"%.1f".format(res.storageFreeGb)} GB of ${"%.1f".format(res.storageTotalGb)} GB")
+            appendLine("Thermal: ${res.thermalStatus}")
+            appendLine("Loaded model (PRIMARY): ${everyday.loadedModel?.name ?: "none"}")
+            appendLine("Loaded model (CODER):   ${coder.loadedModel?.name ?: "none"}")
+            appendLine("GitHub: ${if (githubEngine.isConfigured()) "configured" else "NOT configured"}")
+            appendLine("Internet policy: ${if (networkGuard.isInternetAllowed()) "ALLOWED" else "RECALLED"}")
+            appendLine("Constitution: enforced (12 rules, immutable)")
+            appendLine("==================================================")
+        }
     }
 
     companion object {

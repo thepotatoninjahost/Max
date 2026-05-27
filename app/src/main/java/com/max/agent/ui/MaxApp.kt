@@ -432,7 +432,7 @@ private fun ChatTab(max: MaxSystem) {
 
         generationJob = scope.launch(Dispatchers.IO) {
             try {
-                val finalAnswer = max.agentLoop.run(MaxIdentity.buildSystemPrompt(), messages.dropLast(2).map { ChatMessage(it.role, it.content) }, text)
+                val finalAnswer = max.agentLoop.run(MaxIdentity.buildSystemPrompt() + "\n\n" + max.captureLiveContext(), messages.dropLast(2).map { ChatMessage(it.role, it.content) }, text)
                 val clean = finalAnswer.replace(Regex("(?m)^Thought:.*$"), "").replace(Regex("<action>[\\s\\S]*?</action>"), "").replace(Regex("(?m)^\\[.*?\\].*$"), "").trim()
                 withContext(Dispatchers.Main) {
                     messages[replyIdx] = messages[replyIdx].copy(content = clean.ifBlank { "DONE." })
