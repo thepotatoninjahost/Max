@@ -382,7 +382,6 @@ private fun PermissionOverlay(state: PermissionState, max: MaxSystem) {
 
 @Composable
 private fun ChatTab(max: MaxSystem) {
-    val modelState by max.modelManager.state.collectAsState()
     val voiceMode by max.voiceEngine.mode.collectAsState()
     val transcript by max.voiceEngine.transcript.collectAsState()
     val rms by max.voiceEngine.rms.collectAsState()
@@ -497,7 +496,7 @@ private fun ChatTab(max: MaxSystem) {
                 }
             } else if (inputText.isNotBlank()) {
                 Box(modifier = Modifier.size(48.dp).background(CyanCore, CutCornerShape(4.dp)).clickable { sendMessage(inputText.trim()); inputText = "" }, contentAlignment = Alignment.Center) {
-                    Icon(Icons.Default.Send, null, tint = VoidBlack)
+                    Icon(Icons.AutoMirrored.Filled.Send, null, tint = VoidBlack)
                 }
             } else {
                 val micScale by animateFloatAsState(if (voiceMode == VoiceEngine.Mode.LISTENING) 1f + (rms.coerceIn(0f, 10f) / 20f) else 1f, label = "")
@@ -518,7 +517,6 @@ private fun ChatTab(max: MaxSystem) {
 
 @Composable
 private fun ModelsTab(max: MaxSystem) {
-    val modelState by max.modelManager.state.collectAsState()
     val available by max.modelManager.available.collectAsState()
     val transferState by max.modelManager.transfer.collectAsState()
     var urlInput by remember { mutableStateOf("") }

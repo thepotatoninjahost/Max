@@ -215,7 +215,7 @@ class VoiceEngine(
         _rms.value = rmsdB 
     }
     
-    override fun onBufferReceived(buffer: ByteArray?) {}
+    @Suppress("OVERRIDE_DEPRECATION") override fun onBufferReceived(buffer: ByteArray?) {}
     
     override fun onEndOfSpeech() { 
         _rms.value = 0f 

@@ -23,7 +23,7 @@ class MaxVoiceInteractionSession(context: Context) : VoiceInteractionSession(con
         Log.i("MaxAssist", "Assist session created")
     }
 
-    override fun onHandleAssist(
+    @Suppress("DEPRECATION") override fun onHandleAssist(
         data: Bundle?,
         structure: AssistStructure?,
         content: AssistContent?

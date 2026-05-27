@@ -47,7 +47,6 @@ class MaxAccessibilityService : AccessibilityService() {
             text = event.text.joinToString(" "),
             nodeTree = root?.let { buildNodeTree(it, 0, budget) }
         )
-        root?.recycle()
     }
 
     override fun onInterrupt() {}
@@ -77,7 +76,6 @@ class MaxAccessibilityService : AccessibilityService() {
                 budget[0] -= 1
                 node.getChild(i)?.let { childNode ->
                     val childTree = buildNodeTree(childNode, depth + 1, budget)
-                    childNode.recycle()
                     childTree
                 }
             }
