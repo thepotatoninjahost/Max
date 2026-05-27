@@ -432,7 +432,7 @@ private fun ChatTab(max: MaxSystem) {
 
         generationJob = scope.launch(Dispatchers.IO) {
             try {
-                val finalAnswer = max.agentLoop.run(MaxIdentity.buildSystemPrompt() + "\n\n" + max.captureLiveContext(), messages.dropLast(2).map { ChatMessage(it.role, it.content) }, text)
+                val finalAnswer = max.agentLoop.run((if (MaxIdentity.injectLiveContext) MaxIdentity.buildSystemPrompt() + "\n\n" + max.captureLiveContext() else MaxIdentity.buildSystemPrompt()), messages.dropLast(2).map { ChatMessage(it.role, it.content) }, text)
                 val clean = finalAnswer.replace(Regex("(?m)^Thought:.*$"), "").replace(Regex("<action>[\\s\\S]*?</action>"), "").replace(Regex("(?m)^\\[.*?\\].*$"), "").trim()
                 withContext(Dispatchers.Main) {
                     messages[replyIdx] = messages[replyIdx].copy(content = clean.ifBlank { "DONE." })
@@ -675,6 +675,7 @@ private fun TerminalTab(max: MaxSystem) {
 @Composable
 private fun SystemTab(max: MaxSystem) {
     val scope = rememberCoroutineScope()
+    val ctx = LocalContext.current
     val sysCtrl by max.systemController.state.collectAsState()
     val resources by max.resourceMonitor.state.collectAsState()
     val network by max.networkStateMonitor.state.collectAsState()
@@ -693,6 +694,43 @@ private fun SystemTab(max: MaxSystem) {
             }
         }
         
+        item {
+            Column(modifier = Modifier.border(1.dp, GhostDim, CutCornerShape(4.dp)).padding(16.dp).fillMaxWidth()) {
+                MatrixText("DEFAULT ASSISTANT ROLE", WarningYellow, 12, FontWeight.Bold)
+                Spacer(Modifier.height(8.dp))
+                MatrixText(
+                    "Grant Max OS-level access: long-press home / power, wake from lock, see what is on screen, intercept assist gesture from any app.",
+                    GhostDim, 10
+                )
+                Spacer(Modifier.height(12.dp))
+                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    WireframeButton("SET AS DEFAULT", CyanCore, {
+                        runCatching {
+                            ctx.startActivity(
+                                android.content.Intent(android.provider.Settings.ACTION_VOICE_INPUT_SETTINGS)
+                                    .addFlags(android.content.Intent.FLAG_ACTIVITY_NEW_TASK)
+                            )
+                        }.onFailure {
+                            runCatching {
+                                ctx.startActivity(
+                                    android.content.Intent(android.provider.Settings.ACTION_MANAGE_DEFAULT_APPS_SETTINGS)
+                                        .addFlags(android.content.Intent.FLAG_ACTIVITY_NEW_TASK)
+                                )
+                            }
+                        }
+                    }, Modifier.weight(1f))
+                    WireframeButton("ASSIST PANEL", GhostDim, {
+                        runCatching {
+                            ctx.startActivity(
+                                android.content.Intent("android.settings.ACTION_ASSIST_GESTURE_SETTINGS")
+                                    .addFlags(android.content.Intent.FLAG_ACTIVITY_NEW_TASK)
+                            )
+                        }
+                    }, Modifier.weight(1f))
+                }
+            }
+        }
+
         item {
             Column(modifier = Modifier.border(1.dp, GhostDim, CutCornerShape(4.dp)).padding(16.dp).fillMaxWidth()) {
                 MatrixText("NETWORK LINK", GhostWhite, 12, FontWeight.Bold)

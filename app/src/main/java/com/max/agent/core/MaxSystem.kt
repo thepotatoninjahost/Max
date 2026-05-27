@@ -36,6 +36,8 @@ object MaxIdentity {
     @Volatile private var _filesDir: File? = null
 
     private val customRules = mutableListOf<String>()
+    @Volatile var injectLiveContext: Boolean = true
+        private set
     private var customPrompt: String? = null
     private val gson = Gson()
 
@@ -54,6 +56,7 @@ object MaxIdentity {
             if (!f.exists()) return
             val obj = gson.fromJson(f.readText(), JsonObject::class.java) ?: return
             customPrompt = obj.get("customPrompt")?.takeIf { !it.isJsonNull }?.asString
+                injectLiveContext = obj.get("injectLiveContext")?.takeIf { !it.isJsonNull }?.asBoolean ?: false
             customRules.clear()
             obj.getAsJsonArray("customRules")?.forEach { customRules.add(it.asString) }
         } catch (e: Exception) {
@@ -67,6 +70,7 @@ object MaxIdentity {
             f.parentFile?.mkdirs()
             val obj = JsonObject().apply {
                 if (customPrompt != null) addProperty("customPrompt", customPrompt) else add("customPrompt", com.google.gson.JsonNull.INSTANCE)
+                addProperty("injectLiveContext", injectLiveContext)
                 add("customRules", gson.toJsonTree(customRules))
             }
             f.writeText(gson.toJson(obj))
@@ -175,6 +179,11 @@ object MaxIdentity {
     
     fun getRules(): List<String> = customRules.toList()
     
+    fun setInjectLiveContext(v: Boolean) {
+        injectLiveContext = v
+        persist()
+    }
+
     fun hasCustomPrompt(): Boolean = customPrompt != null
 }
 
@@ -327,6 +336,19 @@ class MaxSystem private constructor(val context: Context) {
      * "what's my battery", "am I on wifi") instantly from real device state —
      * without calling an action and without fabricating.
      */
+
+    /** Set by MainActivity when launched via the assist gesture. Surfaced in the
+     *  next live context block so Max knows what the owner was looking at. */
+    @Volatile var lastAssistContext: String? = null
+        private set
+
+    fun recordAssistInvocation(foregroundPackage: String, webUri: String?) {
+        lastAssistContext = buildString {
+            append("Owner triggered assist from app: $foregroundPackage")
+            webUri?.let { append(" (URL: $it)") }
+        }
+    }
+
     fun captureLiveContext(): String {
         val now = java.time.ZonedDateTime.now()
         val date = now.format(java.time.format.DateTimeFormatter.ofPattern("EEEE, MMMM d, yyyy"))
@@ -354,6 +376,7 @@ class MaxSystem private constructor(val context: Context) {
             appendLine("Loaded model (CODER):   ${coder.loadedModel?.name ?: "none"}")
             appendLine("GitHub: ${if (githubEngine.isConfigured()) "configured" else "NOT configured"}")
             appendLine("Internet policy: ${if (networkGuard.isInternetAllowed()) "ALLOWED" else "RECALLED"}")
+            lastAssistContext?.let { appendLine("AssistInvocation: $it") }
             appendLine("Constitution: enforced (12 rules, immutable)")
             appendLine("==================================================")
         }

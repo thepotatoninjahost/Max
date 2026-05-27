@@ -32,6 +32,12 @@ class MainActivity : FragmentActivity() {
             NexaSdk.getInstance().init(this)
             max = MaxSystem.getInstance(this)
             max.initialize()
+            // If MainActivity was launched by the assist gesture, route the assist context into Max.
+            if (intent?.getBooleanExtra("assist_invoked", false) == true) {
+                val pkg = intent.getStringExtra("assist_foreground_pkg") ?: "(unknown)"
+                val uri = intent.getStringExtra("assist_web_uri")
+                max.recordAssistInvocation(pkg, uri)
+            }
         } catch (e: Throwable) {
             startupError = "${e.javaClass.simpleName}: ${e.message}\n\n${e.stackTraceToString().take(800)}"
         }
