@@ -39,13 +39,14 @@ class MaxAccessibilityService : AccessibilityService() {
     }
 
     override fun onAccessibilityEvent(event: AccessibilityEvent) {
-        val root = rootInActiveWindow
+        val root = runCatching { rootInActiveWindow }.getOrNull() ?: return
         val budget = intArrayOf(MAX_NODES)
+        
         _screenContent.value = ScreenContent(
             packageName = event.packageName?.toString() ?: "",
             eventType = event.eventType,
-            text = event.text.joinToString(" "),
-            nodeTree = root?.let { buildNodeTree(it, 0, budget) }
+            text = runCatching { event.text.joinToString(" ") }.getOrDefault(""),
+            nodeTree = buildNodeTree(root, 0, budget)
         )
     }
 
@@ -64,22 +65,20 @@ class MaxAccessibilityService : AccessibilityService() {
         val bounds = android.graphics.Rect()
         node.getBoundsInScreen(bounds)
 
-        // Bounded recursion: cap on depth + total node count. Deep / pathological
-        // UI trees (web views, recycler views inside scaffolds) used to be able to
-        // blow the stack or OOM us. We now stop descending past MAX_DEPTH and
-        // refuse to allocate more than MAX_NODES total per pass.
         val children = if (depth >= MAX_DEPTH || budget[0] <= 0) {
             emptyList()
         } else {
-            (0 until node.childCount).mapNotNull { i ->
-                if (budget[0] <= 0) return@mapNotNull null
+            val childCount = node.childCount
+            val list = ArrayList<UINode>(childCount.coerceAtMost(budget[0]))
+            for (i in 0 until childCount) {
+                if (budget[0] <= 0) break
+                val child = runCatching { node.getChild(i) }.getOrNull() ?: continue
                 budget[0] -= 1
-                node.getChild(i)?.let { childNode ->
-                    val childTree = buildNodeTree(childNode, depth + 1, budget)
-                    childTree
-                }
+                list.add(buildNodeTree(child, depth + 1, budget))
             }
+            list
         }
+        
         return UINode(
             className = node.className?.toString() ?: "",
             text = node.text?.toString() ?: "",
