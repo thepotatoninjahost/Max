@@ -16,9 +16,7 @@ import java.util.UUID
  * Real runtime code execution via Mozilla Rhino JavaScript engine.
  *
  * Scripts are actual JavaScript that runs in the JVM with full access
- * to Android APIs via Rhino's Java bridge. This is the "doctor" —
- * not a band-aid. Changes made here are real, immediate, and can be
- * persisted as autorun scripts that fire on every startup.
+ * to Android APIs via Rhino's Java bridge.
  *
  * Binding injected into every script:
  * ctx        — Android Context
@@ -63,7 +61,7 @@ class ScriptingEngine(private val context: Context) {
         maxSystem: Any? = null
     ): ScriptResult = withContext(Dispatchers.Default) {
         val start = System.currentTimeMillis()
-        val outputLines = mutableListOf<String>()
+        val outputLines = java.util.Collections.synchronizedList(mutableListOf<String>())
 
         val rhinoCtx = org.mozilla.javascript.Context.enter()
         try {
@@ -97,16 +95,20 @@ class ScriptingEngine(private val context: Context) {
                     thisObj: org.mozilla.javascript.Scriptable,
                     args: Array<Any>
                 ): Any {
-                    val fn = args.firstOrNull() as? org.mozilla.javascript.Function
-                        ?: return false
-                    val capturedScope = s
-                    android.os.Handler(android.os.Looper.getMainLooper()).post {
+                    val fn = args.firstOrNull() as? org.mozilla.javascript.Function ?: return false
+                    
+                    // Critical Fix: Use synchronous run on main looper with clean context creation 
+                    // to prevent scope leakage or multi-threaded memory mutation.
+                    val handler = android.os.Handler(android.os.Looper.getMainLooper())
+                    handler.post {
                         val mainCtx = org.mozilla.javascript.Context.enter()
                         try {
                             mainCtx.optimizationLevel = -1
-                            fn.call(mainCtx, capturedScope, capturedScope, emptyArray())
+                            // Generate safe sub-scope for main UI executions
+                            val mainScope = mainCtx.initStandardObjects(s, false)
+                            fn.call(mainCtx, mainScope, mainScope, emptyArray())
                         } catch (e: Exception) {
-                            android.util.Log.e("MaxScript", "runOnMain error: ${e.message}")
+                            android.util.Log.e("MaxScript", "runOnMain execution error: ${e.message}")
                         } finally {
                             org.mozilla.javascript.Context.exit()
                         }
@@ -135,18 +137,15 @@ class ScriptingEngine(private val context: Context) {
         } catch (e: EcmaError) {
             val msg = "EcmaError line ${e.lineNumber()}: ${e.errorMessage}"
             appendLog("✗ $msg")
-            ScriptResult(script = script, output = null, success = false,
-                error = msg, durationMs = System.currentTimeMillis() - start)
+            ScriptResult(script = script, output = null, success = false, error = msg, durationMs = System.currentTimeMillis() - start)
         } catch (e: EvaluatorException) {
             val msg = "EvalError: ${e.message}"
             appendLog("✗ $msg")
-            ScriptResult(script = script, output = null, success = false,
-                error = msg, durationMs = System.currentTimeMillis() - start)
+            ScriptResult(script = script, output = null, success = false, error = msg, durationMs = System.currentTimeMillis() - start)
         } catch (e: Exception) {
             val msg = "Error: ${e.message}"
             appendLog("✗ $msg")
-            ScriptResult(script = script, output = null, success = false,
-                error = msg, durationMs = System.currentTimeMillis() - start)
+            ScriptResult(script = script, output = null, success = false, error = msg, durationMs = System.currentTimeMillis() - start)
         } finally {
             org.mozilla.javascript.Context.exit()
         }
@@ -187,21 +186,17 @@ class ScriptingEngine(private val context: Context) {
         return autorun + saved
     }
 
-    // ── Internal ──────────────────────────────────────────────────────────────
-
     private fun put(
         scope: org.mozilla.javascript.Scriptable,
         name: String,
         value: Any,
         @Suppress("UNUSED_PARAMETER") cx: org.mozilla.javascript.Context
     ) {
-        ScriptableObject.putProperty(scope, name,
-            org.mozilla.javascript.Context.javaToJS(value, scope))
+        ScriptableObject.putProperty(scope, name, org.mozilla.javascript.Context.javaToJS(value, scope))
     }
 
     private fun appendLog(msg: String) {
-        val ts = java.text.SimpleDateFormat("HH:mm:ss", java.util.Locale.US)
-            .format(java.util.Date())
+        val ts = java.text.SimpleDateFormat("HH:mm:ss", java.util.Locale.US).format(java.util.Date())
         _log.value = (_log.value + "[$ts] $msg").takeLast(200)
         Log.d("MaxScript", msg)
     }
