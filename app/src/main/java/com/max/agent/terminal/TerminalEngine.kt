@@ -65,6 +65,7 @@ class TerminalEngine(private val context: Context) {
     val isRunning: StateFlow<Boolean> = _isRunning
 
     suspend fun exec(command: String, timeoutMs: Long = 30_000L): CommandResult {
+        kotlinx.coroutines.yield()
         return mutex.withLock {
             _isRunning.value = true
             val start = System.currentTimeMillis()
@@ -73,10 +74,6 @@ class TerminalEngine(private val context: Context) {
             try {
                 withTimeout(timeoutMs) {
                     withContext(Dispatchers.IO) {
-                        // UPGRADE: Launch an interactive naked shell and feed complex multi-line AI scripts via STDIN. 
-                        // This bypasses Android mksh parsing failures and truncation limits of the "-c" argument flag.
-                        // Resolve absolute shell path. The Android app environment has no useful PATH
-                        // by default, so `ProcessBuilder("sh")` may fail to locate the shell.
                         val shellPath = listOf("/system/bin/sh", "/system/xbin/sh")
                             .firstOrNull { java.io.File(it).canExecute() } ?: "sh"
 
@@ -84,8 +81,6 @@ class TerminalEngine(private val context: Context) {
                             .directory(context.filesDir)
                             .redirectErrorStream(false)
 
-                        // Inject a usable POSIX environment. Without these, most commands
-                        // (mktemp, awk, sed pipelines, etc.) silently fail with cryptic errors.
                         val env = builder.environment()
                         val existingPath = env["PATH"].orEmpty()
                         val basePath = "/system/bin:/system/xbin:/vendor/bin:/product/bin"
@@ -102,11 +97,8 @@ class TerminalEngine(private val context: Context) {
                         env["PWD"] = context.filesDir.absolutePath
 
                         process = builder.start()
-
                         val p = process!!
                         
-                        // Feed command natively to pipe, then close it. Closing stdin forces the shell 
-                        // to exit gracefully when the script is done, entirely preventing infinite hangs.
                         p.outputStream.writer().use { writer ->
                             writer.write("$command\nexit\n")
                             writer.flush()
@@ -140,8 +132,6 @@ class TerminalEngine(private val context: Context) {
                 appendHistory(result)
                 result
             } finally {
-                // CRITICAL FIX: Explicitly closing streams intercepts Java's blocking I/O blindspot. 
-                // This forces reader.read() to instantly throw an IOException, releasing the leaked thread back to the IO pool.
                 process?.let { p ->
                     runCatching { p.inputStream.close() }
                     runCatching { p.errorStream.close() }
