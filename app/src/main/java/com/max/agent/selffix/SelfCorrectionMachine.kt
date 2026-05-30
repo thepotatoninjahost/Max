@@ -20,17 +20,6 @@ import org.json.JSONObject
 import java.io.File
 import java.util.concurrent.ConcurrentLinkedQueue
 
-/**
- * Self-Healing Engine.
- *
- * Three honest steps — no patches, no workarounds, no band-aids:
- *
- * 1. RULE FIX    — instant, no model needed (permission errors, path errors)
- * 2. AGENT FIX   — AgentLoop reasons, writes executable code, runs it, verifies
- * 3. QUEUE       — no model loaded: persist to disk, fix the moment model loads
- *
- * The error stays open until it is actually fixed. Nothing is pretended away.
- */
 class SelfCorrectionMachine(
     private val context: Context,
     private val failureDetector: FailureDetector,
@@ -66,13 +55,10 @@ class SelfCorrectionMachine(
     val attempt: StateFlow<Attempt?>      = _attempt
     val history: StateFlow<List<Attempt>> = _history
 
-    // Upgraded to a thread-safe concurrent queue
     private val pendingFailures = ConcurrentLinkedQueue<FailureDetector.Failure>()
 
     var agentLoop:    AgentLoop?    = null
     var modelManager: ModelManager? = null
-
-    // ── Lifecycle ─────────────────────────────────────────────────────────────
 
     fun start() {
         loadPersistedQueue()
@@ -86,9 +72,8 @@ class SelfCorrectionMachine(
         }
 
         scope.launch {
-            val mm = modelManager ?: return@launch
-            mm.state.collect { modelState ->
-                if (modelState.isLoaded && pendingFailures.isNotEmpty()) {
+            modelManager?.state?.collect { modelState ->
+                if (modelState.isLoaded && pendingFailures.isNotEmpty() && _phase.value !in BUSY_PHASES) {
                     drainQueue()
                 }
             }
@@ -98,8 +83,6 @@ class SelfCorrectionMachine(
     fun resetToNominal() {
         _phase.value = Phase.NOMINAL
     }
-
-    // ── Core ──────────────────────────────────────────────────────────────────
 
     private suspend fun handle(failure: FailureDetector.Failure) = mutex.withLock {
         var a = Attempt(failure).log("⚡ ${failure.type}: ${failure.message}")
@@ -165,18 +148,20 @@ class SelfCorrectionMachine(
         )
     }
 
-    // Locked drainQueue to prevent LLM collision when handling off-cycle tasks
-    private suspend fun drainQueue() = mutex.withLock {
-        val loop = agentLoop ?: return@withLock
-        while (pendingFailures.isNotEmpty()) {
-            val failure = pendingFailures.poll() ?: break
-            persistQueue()
-            agentFix(Attempt(failure), failure, loop, fromQueue = true)
+    private suspend fun drainQueue() {
+        if (!mutex.tryLock()) return
+        try {
+            val loop = agentLoop ?: return
+            while (pendingFailures.isNotEmpty()) {
+                if (modelManager?.state?.value?.isLoaded != true) break
+                val failure = pendingFailures.poll() ?: break
+                persistQueue()
+                agentFix(Attempt(failure), failure, loop, fromQueue = true)
+            }
+        } finally {
+            mutex.unlock()
         }
     }
-
-
-        // ── Rule-based fixes (no model required) ─────────────────────────────────
 
     private suspend fun tryRuleBasedFix(f: FailureDetector.Failure): String? {
         if (f.type != FailureDetector.FailureType.COMMAND_FAILURE) return null
@@ -192,9 +177,6 @@ class SelfCorrectionMachine(
         }
     }
 
-
-    // ── Task builder ──────────────────────────────────────────────────────────
-
     private fun buildTask(f: FailureDetector.Failure, attempt: Int) = buildString {
         if (attempt > 1) appendLine("Previous attempt failed. Try a completely different approach.")
         appendLine("SELF-HEALING TASK: Fix this error. The actual fix — not a workaround.")
@@ -208,8 +190,6 @@ class SelfCorrectionMachine(
         appendLine("Use SHELL_COMMAND for shell-level issues.")
         appendLine("Verify the fix actually worked before declaring done.")
     }
-
-    // ── Queue persistence ─────────────────────────────────────────────────────
 
     private fun persistQueue() {
         runCatching {
@@ -254,8 +234,6 @@ class SelfCorrectionMachine(
             }
         }
     }
-
-    // ── State helpers ─────────────────────────────────────────────────────────
 
     private fun set(a: Attempt, phase: Phase) {
         _phase.value   = phase
