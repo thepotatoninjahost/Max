@@ -1,24 +1,15 @@
 package com.max.agent.assistant
 
-import android.service.voice.VoiceInteractionService
-import android.util.Log
+import android.os.Bundle
+import android.service.voice.VoiceInteractionSession
+import android.service.voice.VoiceInteractionSessionService
 
 /**
- * Entry point for the "Default Digital Assistant" role on Android.
- *
- * Once the owner selects Max in Settings -> Default apps -> Digital assistant,
- * this service is bound by the system. Long-press home (or the configured
- * assist gesture) routes through here, which then spawns a
- * MaxVoiceInteractionSession via MaxVoiceInteractionSessionService.
+ * Factory for MaxVoiceInteractionSession instances.
+ * Bound by the platform each time the assist gesture fires.
  */
-class MaxVoiceInteractionService : VoiceInteractionService() {
-    override fun onReady() {
-        super.onReady()
-        Log.i("MaxAssist", "VoiceInteractionService ready")
-    }
-
-    override fun onShutdown() {
-        Log.i("MaxAssist", "VoiceInteractionService shutdown")
-        super.onShutdown()
+class MaxVoiceInteractionSessionService : VoiceInteractionSessionService() {
+    override fun onNewSession(args: Bundle?): VoiceInteractionSession {
+        return MaxVoiceInteractionSession(this)
     }
 }
