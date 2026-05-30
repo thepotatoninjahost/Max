@@ -59,21 +59,15 @@ import kotlinx.coroutines.withContext
 import java.text.SimpleDateFormat
 import java.util.*
 
-// ─────────────────────────────────────────────────────────────────────────────
-// Abstract Matrix Colors & Styles
-// ─────────────────────────────────────────────────────────────────────────────
-
-// === SUPERVILLAIN PALETTE ===
-// Dark, gloomy substrate with vivid radioactive accents.
 val VoidBlack      = Color(0xFF000000)
-val Carbon         = Color(0xFF0A080C)   // slight purple tint
-val ObsidianMist   = Color(0xFF1A141F)   // panel surface
-val CyanCore       = Color(0xFF39FF14)   // toxic neon green (primary accent)
-val AlertRed       = Color(0xFF8B0000)   // blood red (danger / destructive)
-val WarningYellow  = Color(0xFFFF6B00)   // hazard orange (warn / caution)
-val VenomPurple    = Color(0xFF9D00FF)   // venom purple (secondary accent)
-val GhostWhite     = Color(0xFFEAEAE6)   // primary text — dimmed for gloom
-val GhostDim       = Color(0xFF2A2A2A)   // borders / muted text
+val Carbon         = Color(0xFF0A080C)
+val ObsidianMist   = Color(0xFF1A141F)
+val CyanCore       = Color(0xFF39FF14)
+val AlertRed       = Color(0xFF8B0000)
+val WarningYellow  = Color(0xFFFF6B00)
+val VenomPurple    = Color(0xFF9D00FF)
+val GhostWhite     = Color(0xFFEAEAE6)
+val GhostDim       = Color(0xFF2A2A2A)
 
 val MatrixFont = FontFamily.Monospace
 
@@ -95,10 +89,6 @@ fun WireframeButton(text: String, color: Color = CyanCore, onClick: () -> Unit, 
         MatrixText(text, color, 12, FontWeight.Bold)
     }
 }
-
-// ─────────────────────────────────────────────────────────────────────────────
-// Root Coordinate Space
-// ─────────────────────────────────────────────────────────────────────────────
 
 @Composable
 fun MaxApp(max: MaxSystem) {
@@ -212,10 +202,6 @@ private fun UnlockScreen(auth: OwnerAuth) {
     }
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
-// Abstract Matrix Architecture
-// ─────────────────────────────────────────────────────────────────────────────
-
 @Composable
 fun MaxMainContent(max: MaxSystem) {
     var currentTab by remember { mutableIntStateOf(0) }
@@ -224,7 +210,6 @@ fun MaxMainContent(max: MaxSystem) {
     val networkState by max.networkGuard.state.collectAsState()
     val logEntries by max.actionLog.entries.collectAsState()
     Box(modifier = Modifier.fillMaxSize().background(VoidBlack)) {
-        // Main Content Layer
         Box(modifier = Modifier.fillMaxSize().padding(top = 80.dp, bottom = 80.dp)) {
             when (currentTab) {
                 0 -> ChatTab(max)
@@ -236,13 +221,8 @@ fun MaxMainContent(max: MaxSystem) {
             }
         }
 
-        // Floating HUD Header (Replaces TopBar & Drawer Actions)
         HUDHeader(systemState, networkState, max)
-
-        // Permission Override Layer
         PermissionOverlay(permissionState, max)
-
-        // Orbital Navigation Matrix (Bottom Right)
         OrbitalNav(currentTab) { currentTab = it }
     }
 }
@@ -294,7 +274,6 @@ private fun OrbitalNav(current: Int, onSelect: (Int) -> Unit) {
     Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.BottomEnd) {
         Box(modifier = Modifier.padding(24.dp), contentAlignment = Alignment.BottomEnd) {
             
-            // Nodes (Expanded to include all original features)
             val tabs = listOf("UPLINK", "CORES", "SHELL", "DIAG", "LOGS", "DIRECTIVES")
             tabs.forEachIndexed { index, label ->
                 val offset by animateFloatAsState(if (expanded) ((tabs.size - index) * 60f) else 0f, spring(dampingRatio = Spring.DampingRatioMediumBouncy), label = "off")
@@ -315,7 +294,6 @@ private fun OrbitalNav(current: Int, onSelect: (Int) -> Unit) {
                 }
             }
 
-            // Core Trigger
             Box(
                 modifier = Modifier
                     .size(48.dp)
@@ -377,4 +355,13 @@ private fun PermissionOverlay(state: PermissionState, max: MaxSystem) {
     }
 }
 
-// ─────────────────────
+// ─────────────────────────────────────────────────────────────────────────────
+// Content Tab Placeholders to support layout rendering cleanly
+// ─────────────────────────────────────────────────────────────────────────────
+
+@Composable private fun ChatTab(max: MaxSystem) { Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) { MatrixText("UPLINK SECURE", CyanCore, 14) } }
+@Composable private fun ModelsTab(max: MaxSystem) { Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) { MatrixText("COMPUTE CORES ACTIVE", CyanCore, 14) } }
+@Composable private fun TerminalTab(max: MaxSystem) { Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) { MatrixText("INTERACTIVE SHELL READY", CyanCore, 14) } }
+@Composable private fun SystemTab(max: MaxSystem) { Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) { MatrixText("DIAGNOSTIC MATRIX NOMINAL", CyanCore, 14) } }
+@Composable private fun LogTab(entries: List<ActionLog.LogEntry>) { Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) { MatrixText("AUDIT STREAM SYNCED", CyanCore, 14) } }
+@Composable private fun RulesTab() { Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) { MatrixText("DIRECTIVES STANDING", CyanCore, 14) } }
