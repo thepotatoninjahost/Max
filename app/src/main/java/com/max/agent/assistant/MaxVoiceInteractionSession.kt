@@ -10,9 +10,7 @@ import android.util.Log
 import com.max.agent.ui.MainActivity
 
 /**
- * The live assist session — created when the owner triggers the assist gesture
- * (long-press home, power-button long-press, or "OK Google" / "Hey Max" hotword).
- *
+ * The live assist session — created when the owner triggers the assist gesture.
  * Captures the current foreground app structure + screenshot, then hands off
  * to MainActivity so Max can act on what the owner is looking at.
  */
@@ -30,7 +28,6 @@ class MaxVoiceInteractionSession(context: Context) : VoiceInteractionSession(con
     ) {
         super.onHandleAssist(data, structure, content)
 
-        // Stash what the owner was looking at, then route into Max.
         val foregroundPkg = structure?.activityComponent?.packageName ?: "(unknown)"
         val webUri = content?.webUri?.toString()
         val structuredData = content?.structuredData
@@ -42,15 +39,20 @@ class MaxVoiceInteractionSession(context: Context) : VoiceInteractionSession(con
             putExtra("assist_structured_data", structuredData)
             putExtra("assist_invoked", true)
         }
-        startVoiceActivity(launch)
+        
+        // Critical Fix: Standardize session transfer to bypass strict context restrictions 
+        // across non-activity hooks on newer Android endpoints.
+        runCatching {
+            startVoiceActivity(launch)
+        }.onFailure {
+            launch.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+            context.startActivity(launch)
+        }
         hide()
     }
 
     override fun onHandleScreenshot(screenshot: android.graphics.Bitmap?) {
         super.onHandleScreenshot(screenshot)
-        // The screenshot is delivered here. We could persist it to filesDir
-        // for Max to inspect, but for now we just log size; future work can
-        // route this through the multimodal slot once a VLM is loaded.
         screenshot?.let { Log.i("MaxAssist", "Got screen ${it.width}x${it.height}") }
     }
 }
