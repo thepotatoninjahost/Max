@@ -17,9 +17,11 @@ import kotlinx.coroutines.launch
 import java.util.Locale
 
 class VoiceEngine(
-    private val context: Context,
+    context: Context,
     private val scope: CoroutineScope
 ) : RecognitionListener, TextToSpeech.OnInitListener {
+
+    private val appContext = context.applicationContext
 
     enum class Mode { IDLE, LISTENING, SPEAKING }
 
@@ -53,11 +55,11 @@ class VoiceEngine(
 
     fun initialize() {
         scope.launch(Dispatchers.Main) {
-            if (SpeechRecognizer.isRecognitionAvailable(context)) {
-                recognizer = SpeechRecognizer.createSpeechRecognizer(context)
+            if (SpeechRecognizer.isRecognitionAvailable(appContext)) {
+                recognizer = SpeechRecognizer.createSpeechRecognizer(appContext)
                 recognizer?.setRecognitionListener(this@VoiceEngine)
             }
-            tts = TextToSpeech(context, this@VoiceEngine)
+            tts = TextToSpeech(appContext, this@VoiceEngine)
         }
     }
 
@@ -102,7 +104,7 @@ class VoiceEngine(
             try {
                 recognizer?.stopListening()
             } catch (e: Exception) {
-                // Ignore errors on stop
+                // Keep engine neutral on arbitrary manual interrupts
             } finally {
                 _mode.value = Mode.IDLE
                 _rms.value = 0f
@@ -172,6 +174,10 @@ class VoiceEngine(
                 tts?.shutdown()
             } catch (_: Exception) {}
             tts = null
+
+            onResultCallback = null
+            onErrorCallback = null
+            onSpeakDoneCallback = null
         }
     }
 
@@ -208,18 +214,10 @@ class VoiceEngine(
     // ─── RecognitionListener ──────────────────────────────────────────────────
 
     override fun onReadyForSpeech(params: Bundle?) {}
-    
     override fun onBeginningOfSpeech() {}
-    
-    override fun onRmsChanged(rmsdB: Float) { 
-        _rms.value = rmsdB 
-    }
-    
+    override fun onRmsChanged(rmsdB: Float) { _rms.value = rmsdB }
     @Suppress("OVERRIDE_DEPRECATION") override fun onBufferReceived(buffer: ByteArray?) {}
-    
-    override fun onEndOfSpeech() { 
-        _rms.value = 0f 
-    }
+    override fun onEndOfSpeech() { _rms.value = 0f }
     
     override fun onError(error: Int) {
         scope.launch(Dispatchers.Main) {
@@ -230,10 +228,7 @@ class VoiceEngine(
                 SpeechRecognizer.ERROR_NETWORK, SpeechRecognizer.ERROR_NETWORK_TIMEOUT -> VoiceError.NetworkRequired
                 SpeechRecognizer.ERROR_AUDIO -> VoiceError.MicBlocked
                 SpeechRecognizer.ERROR_RECOGNIZER_BUSY -> VoiceError.RecognizerBusy
-                SpeechRecognizer.ERROR_NO_MATCH -> {
-                    // Silent fail, just reset
-                    return@launch 
-                }
+                SpeechRecognizer.ERROR_NO_MATCH -> return@launch 
                 else -> VoiceError.Unknown(error)
             }
             
@@ -258,9 +253,7 @@ class VoiceEngine(
 
     override fun onPartialResults(partialResults: Bundle?) {
         val matches = partialResults?.getStringArrayList(SpeechRecognizer.RESULTS_RECOGNITION)
-        matches?.firstOrNull()?.let { 
-            _transcript.value = it 
-        }
+        matches?.firstOrNull()?.let { _transcript.value = it }
     }
 
     override fun onEvent(eventType: Int, params: Bundle?) {}
