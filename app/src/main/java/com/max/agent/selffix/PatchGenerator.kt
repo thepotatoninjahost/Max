@@ -34,7 +34,7 @@ class PatchGenerator(
 
         val sb = StringBuilder()
         runCatching {
-            modelManager.generateStreamFlow(prompt, maxTokens = 2048).collect { result ->
+            modelManager.generateStreamFlow(prompt, maxTokens = 4096).collect { result ->
                 when (result) {
                     is LlmStreamResult.Token -> sb.append(result.text)
                     else -> {}
@@ -63,13 +63,12 @@ class PatchGenerator(
     }
 
     private fun extractCode(response: String): String {
-        val regex = Regex("(?is)`{3}(?:kotlin|java)?\\n(.*?)\\n`{3}")
+        val regex = Regex("(?is)`{3}(?:kotlin|java)?\\s*\\n(.*?)\\n\\s*`{3}")
         val match = regex.find(response) ?: return ""
         return match.groupValues[1].trim()
     }
 
     companion object {
-        // Reworded to avoid using literal backticks that break the UI markdown
         private val SYSTEM_PROMPT = """
             You are a Kotlin/Android bug-fixer. Rules:
             1. Diagnose the root cause in one line.
