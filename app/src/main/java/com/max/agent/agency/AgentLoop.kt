@@ -37,17 +37,13 @@ class AgentLoop(
             val responseBuilder = StringBuilder()
             var actionParsed: Agency.Action? = null
 
-            // Stream collection with size-limit safety
             modelManager.generateStreamFlowForSlot(ModelManager.Slot.EVERYDAY, prompt).collect { res ->
                 if (res is LlmStreamResult.Token) {
                     responseBuilder.append(res.text)
                     onToken?.invoke(res.text)
-                    if (responseBuilder.length > 2000) {
+                    if (responseBuilder.length > 8000) {
                         modelManager.stopSlotStream(ModelManager.Slot.EVERYDAY)
                     }
-                    // Bare-JSON detection: most local models won't bother with <action> tags.
-                    // Try wrapper tag first, then fall back to extracting the first complete
-                    // top-level JSON object whose "type" field is a known ActionType.
                     if (responseBuilder.contains("</action>")) {
                         actionParsed = agency.parseAction(responseBuilder.toString())
                     }
@@ -69,7 +65,6 @@ class AgentLoop(
             val result = agency.executeAction(actionParsed!!)
             onStep?.invoke(if (result.success) "[ok] ${result.output.take(120)}" else "[fail] ${result.error}")
             
-            // LOUD FAILURE: If it's fatal, kill the loop immediately.
             if (result.isFatal) {
                 return@withContext "FATAL SYSTEM ERROR: ${result.error}"
             }
@@ -81,11 +76,6 @@ class AgentLoop(
         finalAnswer
     }
 
-    /**
-     * Locate a complete top-level JSON object inside [buf] that contains a "type" field.
-     * Walks back from the first occurrence of "type" to find the enclosing '{', then forward
-     * with depth+string tracking to find its matching '}'. Returns the JSON substring or null.
-     */
     private fun extractJsonAction(buf: CharSequence): String? {
         val typeIdx = buf.indexOf("\"type\"")
         if (typeIdx < 0) return null
