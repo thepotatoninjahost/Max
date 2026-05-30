@@ -17,12 +17,6 @@ import java.util.UUID
  *
  * Scripts are actual JavaScript that runs in the JVM with full access
  * to Android APIs via Rhino's Java bridge.
- *
- * Binding injected into every script:
- * ctx        — Android Context
- * max        — MaxSystem instance (full API access)
- * log        — function(msg) prints to ScriptLog
- * filesDir   — path string to app's internal storage
  */
 class ScriptingEngine(private val context: Context) {
 
@@ -97,15 +91,14 @@ class ScriptingEngine(private val context: Context) {
                 ): Any {
                     val fn = args.firstOrNull() as? org.mozilla.javascript.Function ?: return false
                     
-                    // Critical Fix: Use synchronous run on main looper with clean context creation 
-                    // to prevent scope leakage or multi-threaded memory mutation.
                     val handler = android.os.Handler(android.os.Looper.getMainLooper())
                     handler.post {
                         val mainCtx = org.mozilla.javascript.Context.enter()
                         try {
                             mainCtx.optimizationLevel = -1
-                            // Generate safe sub-scope for main UI executions
-                            val mainScope = mainCtx.initStandardObjects(s, false)
+                            val mainScope = mainCtx.newObject(s)
+                            mainScope.prototype = s
+                            mainScope.parentScope = null
                             fn.call(mainCtx, mainScope, mainScope, emptyArray())
                         } catch (e: Exception) {
                             android.util.Log.e("MaxScript", "runOnMain execution error: ${e.message}")
