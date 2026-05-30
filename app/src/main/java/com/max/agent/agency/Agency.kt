@@ -22,18 +22,6 @@ import kotlinx.coroutines.withTimeout
 import org.json.JSONObject
 import java.io.File
 
-/**
- * Constitution-aware action executor.
- *
- * Every action flows through `executeAction`. The flow is:
- *   1. Always record the *attempt* in the ActionLog (Rule 6).
- *   2. If lockdown -> reject.
- *   3. If risk >= Medium and not in the read-only allow-list -> route through PermissionGate and await owner approval.
- *   4. Execute under a 30s timeout, store result, log outcome.
- *
- * No silent stubs. Unimplemented actions return a typed failure. The `else` arm of the
- * when-expression is exhaustive on `ActionType` so the compiler guarantees coverage.
- */
 class Agency(
     private val context: Context,
     private val terminal: TerminalEngine,
@@ -48,8 +36,6 @@ class Agency(
     private val networkGuard: NetworkGuard,
     private val onSetVoice: ((String, Float, Float) -> Unit)? = null
 ) {
-    // Scoped-storage compliant. context.getExternalFilesDir is app-owned and does
-    // not require READ/WRITE_EXTERNAL_STORAGE on API 29+.
     private val maxVault = File(
         context.getExternalFilesDir(null) ?: context.filesDir,
         "Max_Core"
@@ -108,7 +94,6 @@ class Agency(
     suspend fun executeAction(action: Action): ActionResult {
         val requester = "LLM/${action.description.take(60)}"
 
-        // Read-only / diagnostic allow-list — these bypass the approval gate.
         val readOnly = action.type in setOf(
             ActionType.NONE,
             ActionType.GET_SYSTEM_STATE,
@@ -117,12 +102,10 @@ class Agency(
             ActionType.GITHUB_READ_FILE
         )
 
-        // Lockdown check.
         if (permissionGate.isLockedDown()) {
             return failed(action, "Permission gate is locked down").also { record(it, requester) }
         }
 
-        // Approval gate for non-trivial risk on non-read-only actions.
         if (!readOnly && (action.riskLevel == RiskLevel.Medium || action.riskLevel == RiskLevel.High)) {
             val outcome = permissionGate.requestAndAwait(
                 action = action.description,
@@ -316,7 +299,6 @@ class Agency(
         val rel = action.params["path"].orEmpty()
         val content = action.params["content"].orEmpty()
         if (rel.isBlank()) return failed(action, "Missing 'path'")
-        // Path-traversal guard: stay inside maxVault.
         val target = File(maxVault, rel).canonicalFile
         if (!target.path.startsWith(maxVault.canonicalPath)) {
             return failed(action, "Path escapes vault")
