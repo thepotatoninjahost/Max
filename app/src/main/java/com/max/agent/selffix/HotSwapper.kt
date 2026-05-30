@@ -31,7 +31,6 @@ class HotSwapper(private val context: Context) {
     val swaps: StateFlow<List<SwapRecord>> = _swaps
 
     fun loadFromDex(dexPath: String, className: String): SwapResult = runCatching {
-        // Warning fixed: API 26+ ignores the optimizedDirectory parameter. Pass null to avoid strict mode violations.
         val loader = DexClassLoader(dexPath, null, null, context.classLoader)
         val clazz = loader.loadClass(className)
         val instance = clazz.getDeclaredConstructor().newInstance()
@@ -44,6 +43,7 @@ class HotSwapper(private val context: Context) {
 
     fun installDexBytes(bytes: ByteArray, className: String): SwapResult {
         val file = File(swapDir, "${className.substringAfterLast('.')}_${System.currentTimeMillis()}.dex")
+        if (file.exists()) { file.delete() }
         file.writeBytes(bytes)
         return loadFromDex(file.absolutePath, className)
     }
@@ -61,6 +61,7 @@ class HotSwapper(private val context: Context) {
 
     fun savePatchSource(source: String, className: String): File {
         val file = File(patchDir, "${className}_${System.currentTimeMillis()}.kt")
+        if (file.exists()) { file.delete() }
         file.writeText(source)
         return file
     }
