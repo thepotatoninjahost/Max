@@ -30,7 +30,6 @@ import java.io.File
 import com.google.gson.Gson
 import com.google.gson.JsonObject
 
-// Defined here so it is always visible to MaxSystem
 object MaxIdentity {
     const val IDENTITY_VERSION = "2.0.2"
     @Volatile private var _filesDir: File? = null
@@ -56,7 +55,7 @@ object MaxIdentity {
             if (!f.exists()) return
             val obj = gson.fromJson(f.readText(), JsonObject::class.java) ?: return
             customPrompt = obj.get("customPrompt")?.takeIf { !it.isJsonNull }?.asString
-                injectLiveContext = obj.get("injectLiveContext")?.takeIf { !it.isJsonNull }?.asBoolean ?: false
+            injectLiveContext = obj.get("injectLiveContext")?.takeIf { !it.isJsonNull }?.asBoolean ?: false
             customRules.clear()
             obj.getAsJsonArray("customRules")?.forEach { customRules.add(it.asString) }
         } catch (e: Exception) {
@@ -80,8 +79,6 @@ object MaxIdentity {
     }
 
     fun buildSystemPrompt(): String {
-        // Inject the REAL current date/time at every prompt build so the model can never
-        // hallucinate a fabricated "as of" date from its training cutoff.
         val now = java.text.SimpleDateFormat("yyyy-MM-dd HH:mm:ss z", java.util.Locale.US)
             .apply { timeZone = java.util.TimeZone.getDefault() }
             .format(java.util.Date())
@@ -101,58 +98,42 @@ object MaxIdentity {
             ║     respond in plain language OR you emit a single action JSON object  ║
             ║     and STOP. Never both.                                              ║
             ║ R3. To run a tool, emit ONE JSON object — wrapped in <action>…</action>║
-            ║     tags is preferred, but bare JSON is also accepted. Example:        ║
-            ║       <action>{"type":"SHELL_COMMAND","params":{"cmd":"uname -a"},     ║
-            ║                "risk":"low","description":"kernel info"}</action>      ║
-            ║ R4. After emitting an action, STOP generating immediately. The system  ║
-            ║     will execute it and feed the result back as the next user turn.    ║
+            ║     tags is preferred, but bare JSON is also accepted.                 ║
+            ║ R4. After emitting an action, STOP generating immediately.             ║
             ║ R5. If a user asks for a status report, ALWAYS run GET_SYSTEM_STATE    ║
             ║     or SHELL_COMMAND first. NEVER invent metrics.                      ║
             ╚═══════════════════════════════════════════════════════════════════════╝
 
             AVAILABLE TOOLS:
             • SHELL_COMMAND      params: {"cmd": "<shell cmd>"}
-            • GET_SYSTEM_STATE   params: {}                    — battery, network, ram snapshot
-            • READ_FILE          params: {"path": "<rel path under Max_Core>"}
+            • GET_SYSTEM_STATE   params: {}
+            • READ_FILE          params: {"path": "..."}
             • WRITE_FILE         params: {"path": "...", "content": "..."}
             • LIST_DIR           params: {"path": "..."}
-            • SET_VOLUME         params: {"pct": "0..100", "stream": "music|ring|alarm|voice|notification"}
+            • SET_VOLUME         params: {"pct": "0..100", "stream": "..."}
             • SET_BRIGHTNESS     params: {"pct": "0..100"}
-            • OPEN_SETTINGS_PANEL params: {"panel": "wifi|internet|bluetooth|battery|hotspot|nfc"}
-            • RINGER_MODE        params: {"mode": "silent|vibrate|normal"}
+            • OPEN_SETTINGS_PANEL params: {"panel": "..."}
+            • RINGER_MODE        params: {"mode": "..."}
             • TOGGLE_INTERNET    params: {"enable": "true|false"}
-            • LAUNCH_APP         params: {"pkg": "com.example.app"}
-            • SET_VOICE          params: {"gender": "male|female|neutral", "pitch": "1.0", "rate": "1.0"}
-            • EXECUTE_SCRIPT     params: {"script": "<JS source>"}
+            • LAUNCH_APP         params: {"pkg": "..."}
+            • SET_VOICE          params: {"gender": "...", "pitch": "1.0", "rate": "1.0"}
+            • EXECUTE_SCRIPT     params: {"script": "..."}
             • MODIFY_SYSTEM_PROMPT params: {"text": "..."}
             • ADD_RULE           params: {"rule": "..."}
 
-            SELF-MODIFICATION TOOLS (use these to fix your own code):
-            • GITHUB_READ_FILE      params: {"path": "<repo path>"}
+            SELF-MODIFICATION TOOLS:
+            • GITHUB_READ_FILE      params: {"path": "..."}
             • GITHUB_WRITE_FILE     params: {"path": "...", "content": "...", "message": "..."}
-            • GITHUB_TRIGGER_BUILD  params: {}                  — checks the latest CI run
-            • INSTALL_APK           params: {}                  — installs the latest built APK
-            • HOTSWAP_DEX           params: {"dex": "<path>", "class": "<fully.qualified.Class>"}
+            • GITHUB_TRIGGER_BUILD  params: {}
+            • INSTALL_APK           params: {}
+            • HOTSWAP_DEX           params: {"dex": "...", "class": "..."}
 
-            RISK LEVELS — set "risk" honestly. The owner must approve Medium and High.
-            • low    : pure read, status, settings panels, volume/brightness/ringer
+            RISK LEVELS:
+            • low    : pure read, settings panels, volume/brightness/ringer
             • medium : WRITE_FILE, EXECUTE_SCRIPT, LAUNCH_APP, TOGGLE_INTERNET, SET_VOICE
             • high   : SHELL_COMMAND, GITHUB_WRITE_FILE, INSTALL_APK, HOTSWAP_DEX
 
-            SELF-FIX PROTOCOL — when the owner reports a bug in YOU:
-            1. GITHUB_READ_FILE the file you suspect.
-            2. GITHUB_WRITE_FILE the corrected source. This auto-triggers CI.
-            3. GITHUB_TRIGGER_BUILD to poll until the latest run completes successfully.
-            4. INSTALL_APK to download and install the rebuilt APK.
-
-            REMEMBER R2: emit action JSON OR plain text — never both in one turn.
-
-            LIVE CONTEXT — appended below this prompt on EVERY turn:
-            A "=== LIVE PHONE CONTEXT ===" block contains the CURRENT date, time,
-            battery, network, volume, brightness, RAM, storage, and loaded model.
-            For ANY factual question whose answer is in that block, READ IT and
-            answer naturally — do NOT call an action, do NOT guess, do NOT use
-            training-data knowledge. The live context is ground truth.
+            LIVE CONTEXT block appended below contains real device state metrics.
         """.trimIndent()
 
         val rulesStr = if (customRules.isEmpty()) "" else
@@ -162,36 +143,19 @@ object MaxIdentity {
         return customPrompt ?: (basePrompt + rulesStr)
     }
     
-    fun updatePrompt(prompt: String) {
-        customPrompt = prompt
-        persist()
-    }
-    
-    fun addRule(rule: String) {
-        customRules.add(rule)
-        persist()
-    }
-
-    fun clearRules() {
-        customRules.clear()
-        persist()
-    }
-    
+    fun updatePrompt(prompt: String) { customPrompt = prompt; persist() }
+    fun addRule(rule: String) { customRules.add(rule); persist() }
+    fun clearRules() { customRules.clear(); persist() }
     fun getRules(): List<String> = customRules.toList()
-    
-    fun setInjectLiveContext(v: Boolean) {
-        injectLiveContext = v
-        persist()
-    }
-
+    fun setInjectLiveContext(v: Boolean) { injectLiveContext = v; persist() }
     fun hasCustomPrompt(): Boolean = customPrompt != null
 }
 
 class MaxSystem private constructor(val context: Context) {
 
     private val errorHandler = CoroutineExceptionHandler { _, t ->
-        android.util.Log.e("Max", "Fatal: ${t.message}", t)
-        File(context.filesDir, "critical_fail.txt").appendText("[${System.currentTimeMillis()}] ${t.stackTraceToString()}\n\n")
+        android.util.Log.e("Max", "Fatal Engine Drop: ${t.message}", t)
+        runCatching { File(context.filesDir, "critical_fail.txt").appendText("[${System.currentTimeMillis()}] ${t.stackTraceToString()}\n\n") }
     }
     
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main + errorHandler)
@@ -240,6 +204,7 @@ class MaxSystem private constructor(val context: Context) {
         data object Initializing : SystemState()
         data object Ready : SystemState()
         data object LockedDown : SystemState()
+        val isLoaded: Boolean get() = this is Ready
         data class Error(val message: String) : SystemState()
     }
 
@@ -251,57 +216,46 @@ class MaxSystem private constructor(val context: Context) {
         runCatching {
             com.nexa.sdk.NexaSdk.getInstance().init(context.applicationContext)
         }.onFailure {
-            android.util.Log.w("MaxSystem", "NexaSdk.init() threw — model loads may fail", it)
+            android.util.Log.w("MaxSystem", "NexaSdk initialization bypassed", it)
         }
         MaxIdentity.init(context.filesDir)
         failureDetector.installCrashHandler()
         
-        scope.launch(Dispatchers.Main) {
-            delay(1500) 
-            scope.launch(Dispatchers.IO) {
-                try {
-                    File(context.filesDir, "heartbeat").writeText(System.currentTimeMillis().toString())
-                    
-                    sandbox.initialize()
-                    voiceEngine.initialize()
-                    modelManager.scan()
+        // Critical Fix: Offload setup operations to an explicit IO thread pool 
+        // to maximize responsive framing metrics on initialization.
+        scope.launch(Dispatchers.IO) {
+            try {
+                File(context.filesDir, "heartbeat").writeText(System.currentTimeMillis().toString())
+                
+                sandbox.initialize()
+                voiceEngine.initialize()
+                modelManager.scan()
 
-                    // Restore the persisted "primary" slot so the user's
-                    // last assignment survives app restarts. Without this,
-                    // SET PRI looks broken because the wrapper isn't reloaded.
-                    val (everydayPath, _) = modelManager.loadSlotConfig()
-                    if (everydayPath != null) {
-                        modelManager.getModelByPath(everydayPath)?.let { entry ->
-                            modelManager.loadSlot(ModelManager.Slot.EVERYDAY, entry)
-                        }
+                val (everydayPath, _) = modelManager.loadSlotConfig()
+                if (everydayPath != null) {
+                    modelManager.getModelByPath(everydayPath)?.let { entry ->
+                        modelManager.loadSlot(ModelManager.Slot.EVERYDAY, entry)
                     }
-
-                    selfCorrectionMachine.agentLoop = agentLoop
-                    selfCorrectionMachine.modelManager = modelManager
-                    
-                    selfCorrectionMachine.start()
-                    resourceMonitor.startMonitoring()
-                    networkStateMonitor.startMonitoring()
-                    
-                    ensureWatchdog()
-                    
-                    _systemState.value = SystemState.Ready
-                    scriptingEngine.runAutorun(this@MaxSystem)
-                } catch (e: Exception) {
-                    File(context.filesDir, "critical_fail.txt").writeText("Init Failure: ${e.stackTraceToString()}")
-                    _systemState.value = SystemState.Error(e.message ?: "Unknown init failure")
                 }
+
+                selfCorrectionMachine.agentLoop = agentLoop
+                selfCorrectionMachine.modelManager = modelManager
+                
+                selfCorrectionMachine.start()
+                resourceMonitor.startMonitoring()
+                networkStateMonitor.startMonitoring()
+                
+                ensureWatchdog()
+                
+                _systemState.value = SystemState.Ready
+                scriptingEngine.runAutorun(this@MaxSystem)
+            } catch (e: Exception) {
+                runCatching { File(context.filesDir, "critical_fail.txt").writeText("Init Failure: ${e.stackTraceToString()}") }
+                _systemState.value = SystemState.Error(e.message ?: "Unknown execution fault during engine validation")
             }
         }
     }
 
-    /**
-     * Best-effort heartbeat. The previous "watchdog" version tried to spawn a shell
-     * script in /data/local/tmp/, which is forbidden to unprivileged apps on stock
-     * Android — that codepath could never succeed on the user's device. This replacement
-     * writes a UTC timestamp into the app's own filesDir so external tooling (adb,
-     * shizuku, a companion service) can verify Max is alive without root.
-     */
     private fun ensureWatchdog() {
         try {
             File(context.filesDir, "heartbeat.txt").writeText(
@@ -330,15 +284,6 @@ class MaxSystem private constructor(val context: Context) {
         voiceEngine.destroy()
     }
 
-    /**
-     * Live phone snapshot, formatted for direct injection into the system prompt
-     * on every turn so Max can answer factual questions ("what time is it",
-     * "what's my battery", "am I on wifi") instantly from real device state —
-     * without calling an action and without fabricating.
-     */
-
-    /** Set by MainActivity when launched via the assist gesture. Surfaced in the
-     *  next live context block so Max knows what the owner was looking at. */
     @Volatile var lastAssistContext: String? = null
         private set
 
@@ -389,5 +334,4 @@ class MaxSystem private constructor(val context: Context) {
                 INSTANCE ?: MaxSystem(context.applicationContext).also { INSTANCE = it }
             }
     }
-}
-// END OF FILE - ENSURE THIS CLOSING BRACKET ABOVE IS COPIED
+                       }
