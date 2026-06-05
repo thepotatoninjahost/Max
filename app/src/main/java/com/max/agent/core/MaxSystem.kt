@@ -3,6 +3,9 @@ package com.max.agent.core
 import android.content.Context
 import androidx.compose.runtime.mutableStateListOf
 import androidx.compose.runtime.snapshots.SnapshotStateList
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.setValue
+import androidx.compose.runtime.mutableStateOf
 import com.max.agent.agency.Agency
 import com.max.agent.agency.AgentLoop
 import com.max.agent.auth.OwnerAuth
@@ -26,6 +29,7 @@ import com.max.agent.voice.VoiceEngine
 import kotlinx.coroutines.*
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.collect
 import java.io.File
 import com.google.gson.Gson
 import com.google.gson.JsonObject
@@ -197,7 +201,84 @@ class MaxSystem private constructor(val context: Context) {
 
     data class UiMessage(val role: String, val content: String)
     val conversationHistory: SnapshotStateList<UiMessage> = mutableStateListOf()
-    var isGenerating: Boolean = false
+
+    var isGenerating: Boolean by mutableStateOf(false)
+        private set
+    var streamingText: String by mutableStateOf("")
+        private set
+    var stepStatus: String by mutableStateOf("")
+        private set
+
+    private var chatJob: Job? = null
+
+    /**
+     * Drive a full agentic turn: build the system prompt (+ live context),
+     * stream tokens from the EVERYDAY model through the AgentLoop (which may
+     * execute gated tool actions), and update [conversationHistory] live.
+     */
+    fun sendUserMessage(text: String) {
+        val msg = text.trim()
+        if (msg.isEmpty() || isGenerating) return
+        if (_systemState.value !is SystemState.Ready) return
+
+        conversationHistory.add(UiMessage("user", msg))
+        val assistantIndex = conversationHistory.size
+        conversationHistory.add(UiMessage("assistant", ""))
+
+        isGenerating = true
+        streamingText = ""
+        stepStatus = ""
+
+        val history = conversationHistory
+            .take(assistantIndex - 1)
+            .map { com.nexa.sdk.bean.ChatMessage(it.role, it.content) }
+
+        val systemPrompt = buildString {
+            append(MaxIdentity.buildSystemPrompt())
+            if (MaxIdentity.injectLiveContext) {
+                append("\n\n")
+                append(runCatching { captureLiveContext() }.getOrDefault(""))
+            }
+        }
+
+        agentLoop.onToken = { token ->
+            streamingText += token
+            if (assistantIndex < conversationHistory.size) {
+                conversationHistory[assistantIndex] = UiMessage("assistant", streamingText)
+            }
+        }
+        agentLoop.onStep = { step -> stepStatus = step }
+
+        chatJob = scope.launch {
+            val answer = runCatching {
+                agentLoop.run(systemPrompt, history, msg)
+            }.getOrElse { "Error: ${it.message ?: it.javaClass.simpleName}" }
+
+            val finalText = answer.ifBlank { streamingText.ifBlank { "(no response)" } }
+            if (assistantIndex < conversationHistory.size) {
+                conversationHistory[assistantIndex] = UiMessage("assistant", finalText)
+            }
+            if (MaxIdentity.injectLiveContext && voiceEngine.config.value.autoSpeak) {
+                runCatching { voiceEngine.speak(finalText.take(500)) }
+            }
+            stepStatus = ""
+            isGenerating = false
+        }
+    }
+
+    fun stopGeneration() {
+        chatJob?.cancel()
+        chatJob = null
+        scope.launch { runCatching { modelManager.stopStream() } }
+        isGenerating = false
+        stepStatus = ""
+    }
+
+    fun clearConversation() {
+        if (isGenerating) stopGeneration()
+        conversationHistory.clear()
+        streamingText = ""
+    }
 
     sealed class SystemState {
         data object Uninitialized : SystemState()
@@ -244,7 +325,17 @@ class MaxSystem private constructor(val context: Context) {
                 selfCorrectionMachine.start()
                 resourceMonitor.startMonitoring()
                 networkStateMonitor.startMonitoring()
-                
+
+                // Constitution Rule 6: tampering with the audit log triggers lockdown.
+                scope.launch {
+                    actionLog.tampered.collect { tampered ->
+                        if (tampered) {
+                            android.util.Log.e("Max", "ActionLog tamper detected — forcing lockdown")
+                            stopNow()
+                        }
+                    }
+                }
+
                 ensureWatchdog()
                 
                 _systemState.value = SystemState.Ready

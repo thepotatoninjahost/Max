@@ -124,5 +124,16 @@
                 android:name="android.speech"
                 android:resource="@xml/recognition_service" />
         </service>
+
+        <!-- Hard network enforcement: no-route VpnService blackhole engaged when
+             the owner recalls internet. Blocks ALL outbound traffic device-wide. -->
+        <service
+            android:name=".network.MaxVpnService"
+            android:exported="false"
+            android:permission="android.permission.BIND_VPN_SERVICE">
+            <intent-filter>
+                <action android:name="android.net.VpnService" />
+            </intent-filter>
+        </service>
     </application>
 </manifest>

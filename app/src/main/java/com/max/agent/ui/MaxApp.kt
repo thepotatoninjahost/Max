@@ -216,8 +216,8 @@ fun MaxMainContent(max: MaxSystem) {
                 1 -> ModelsTab(max)
                 2 -> TerminalTab(max)
                 3 -> SystemTab(max)
-                4 -> LogTab(logEntries)
-                5 -> RulesTab()
+                4 -> LogTab(max)
+                5 -> RulesTab(max)
             }
         }
 
@@ -356,12 +356,336 @@ private fun PermissionOverlay(state: PermissionState, max: MaxSystem) {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Content Tab Placeholders to support layout rendering cleanly
+// Functional content tabs — each wired to a live engine.
 // ─────────────────────────────────────────────────────────────────────────────
 
-@Composable private fun ChatTab(max: MaxSystem) { Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) { MatrixText("UPLINK SECURE", CyanCore, 14) } }
-@Composable private fun ModelsTab(max: MaxSystem) { Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) { MatrixText("COMPUTE CORES ACTIVE", CyanCore, 14) } }
-@Composable private fun TerminalTab(max: MaxSystem) { Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) { MatrixText("INTERACTIVE SHELL READY", CyanCore, 14) } }
-@Composable private fun SystemTab(max: MaxSystem) { Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) { MatrixText("DIAGNOSTIC MATRIX NOMINAL", CyanCore, 14) } }
-@Composable private fun LogTab(entries: List<ActionLog.LogEntry>) { Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) { MatrixText("AUDIT STREAM SYNCED", CyanCore, 14) } }
-@Composable private fun RulesTab() { Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) { MatrixText("DIRECTIVES STANDING", CyanCore, 14) } }
+@Composable
+private fun ChatTab(max: MaxSystem) {
+    val messages = max.conversationHistory
+    val listState = rememberLazyListState()
+    var input by remember { mutableStateOf("") }
+
+    LaunchedEffect(messages.size, max.streamingText) {
+        if (messages.isNotEmpty()) listState.animateScrollToItem(messages.size - 1)
+    }
+
+    Column(Modifier.fillMaxSize().padding(horizontal = 12.dp)) {
+        if (messages.isEmpty()) {
+            Box(Modifier.weight(1f).fillMaxWidth(), contentAlignment = Alignment.Center) {
+                MatrixText("UPLINK SECURE — AWAITING DIRECTIVE", CyanCore, 13)
+            }
+        } else {
+            LazyColumn(
+                state = listState,
+                modifier = Modifier.weight(1f).fillMaxWidth(),
+                verticalArrangement = Arrangement.spacedBy(10.dp)
+            ) {
+                items(messages) { m ->
+                    val isUser = m.role == "user"
+                    Row(Modifier.fillMaxWidth(), horizontalArrangement = if (isUser) Arrangement.End else Arrangement.Start) {
+                        Column(
+                            Modifier
+                                .fillMaxWidth(0.86f)
+                                .border(1.dp, (if (isUser) CyanCore else GhostDim).copy(alpha = 0.6f), CutCornerShape(6.dp))
+                                .background((if (isUser) CyanCore else GhostWhite).copy(alpha = 0.06f))
+                                .padding(10.dp)
+                        ) {
+                            MatrixText(if (isUser) "OWNER" else "MAX", if (isUser) CyanCore else VenomPurple, 9, FontWeight.Bold)
+                            Spacer(Modifier.height(4.dp))
+                            MatrixText(m.content.ifBlank { if (max.isGenerating && !isUser) "…" else "" }, GhostWhite, 13)
+                        }
+                    }
+                }
+            }
+        }
+
+        if (max.isGenerating && max.stepStatus.isNotBlank()) {
+            MatrixText(max.stepStatus, WarningYellow, 10, modifier = Modifier.padding(vertical = 4.dp))
+        }
+
+        Row(Modifier.fillMaxWidth().padding(vertical = 8.dp), verticalAlignment = Alignment.Bottom) {
+            Box(Modifier.weight(1f)) {
+                AbstractInput("MESSAGE", input, singleLine = false) { input = it }
+            }
+            Spacer(Modifier.width(8.dp))
+            if (max.isGenerating) {
+                WireframeButton("STOP", AlertRed, { max.stopGeneration() }, Modifier.height(44.dp))
+            } else {
+                WireframeButton("SEND", CyanCore, {
+                    if (input.isNotBlank()) { max.sendUserMessage(input); input = "" }
+                }, Modifier.height(44.dp))
+            }
+        }
+        if (messages.isNotEmpty()) {
+            WireframeButton("CLEAR SESSION", GhostDim, { max.clearConversation() }, Modifier.fillMaxWidth())
+            Spacer(Modifier.height(4.dp))
+        }
+    }
+}
+
+@Composable
+private fun ModelsTab(max: MaxSystem) {
+    val available by max.modelManager.available.collectAsState()
+    val everyday by max.modelManager.everydayState.collectAsState()
+    val coder by max.modelManager.coderState.collectAsState()
+    val transfer by max.modelManager.transfer.collectAsState()
+
+    Column(Modifier.fillMaxSize().padding(12.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
+        MatrixText("COMPUTE CORES", CyanCore, 14, FontWeight.Black)
+
+        Column(Modifier.fillMaxWidth().border(1.dp, GhostDim, CutCornerShape(6.dp)).padding(10.dp)) {
+            val eState = if (everyday.isLoading) "loading…" else if (everyday.isLoaded) "loaded" else "idle"
+            val cState = if (coder.isLoading) "loading…" else if (coder.isLoaded) "loaded" else "idle"
+            MatrixText("PRIMARY: ${everyday.loadedModel?.name ?: "none"} [$eState]", GhostWhite, 11)
+            everyday.error?.let { MatrixText("  err: $it", AlertRed, 9) }
+            MatrixText("CODER:   ${coder.loadedModel?.name ?: "none"} [$cState]", GhostWhite, 11)
+            coder.error?.let { MatrixText("  err: $it", AlertRed, 9) }
+        }
+
+        if (transfer.active) {
+            Column(Modifier.fillMaxWidth().border(1.dp, WarningYellow, CutCornerShape(6.dp)).padding(10.dp)) {
+                MatrixText("${transfer.label} ${transfer.fileName}", WarningYellow, 10)
+                LinearProgressIndicator(
+                    progress = { transfer.progress.coerceIn(0f, 1f) },
+                    modifier = Modifier.fillMaxWidth().padding(vertical = 6.dp),
+                    color = CyanCore, trackColor = GhostDim
+                )
+                MatrixText(transfer.progressText, GhostDim, 9)
+                WireframeButton("CANCEL", AlertRed, { max.modelManager.cancelTransfer() }, Modifier.fillMaxWidth())
+            }
+        }
+        transfer.error?.let {
+            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
+                MatrixText("xfer err: $it", AlertRed, 9)
+                WireframeButton("DISMISS", GhostDim, { max.modelManager.clearTransferError() }, Modifier.height(30.dp))
+            }
+        }
+
+        WireframeButton("RESCAN STORAGE", CyanCore, { max.modelManager.scan() }, Modifier.fillMaxWidth())
+
+        if (available.isEmpty()) {
+            Box(Modifier.weight(1f).fillMaxWidth(), contentAlignment = Alignment.Center) {
+                MatrixText("NO LOCAL MODELS — IMPORT A .gguf", GhostDim, 11)
+            }
+        } else {
+            LazyColumn(Modifier.weight(1f).fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                items(available) { entry ->
+                    Column(Modifier.fillMaxWidth().border(1.dp, GhostDim.copy(alpha = 0.5f), CutCornerShape(6.dp)).padding(10.dp)) {
+                        MatrixText(entry.name, GhostWhite, 11, FontWeight.Bold)
+                        MatrixText(entry.displaySize, GhostDim, 9)
+                        Spacer(Modifier.height(6.dp))
+                        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                            WireframeButton("→ PRIMARY", CyanCore, {
+                                max.modelManager.loadSlot(ModelManager.Slot.EVERYDAY, entry) {
+                                    max.modelManager.saveSlotConfig(entry.path, max.modelManager.getCoderEntry()?.path)
+                                }
+                            }, Modifier.weight(1f).height(34.dp))
+                            WireframeButton("→ CODER", VenomPurple, {
+                                max.modelManager.loadSlot(ModelManager.Slot.CODER, entry) {
+                                    max.modelManager.saveSlotConfig(max.modelManager.getEverydayEntry()?.path, entry.path)
+                                }
+                            }, Modifier.weight(1f).height(34.dp))
+                            WireframeButton("DEL", AlertRed, { max.modelManager.deleteModel(entry) }, Modifier.height(34.dp))
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun TerminalTab(max: MaxSystem) {
+    val history by max.terminal.history.collectAsState()
+    val isRunning by max.terminal.isRunning.collectAsState()
+    val scope = rememberCoroutineScope()
+    val listState = rememberLazyListState()
+    var cmd by remember { mutableStateOf("") }
+
+    LaunchedEffect(history.size) {
+        if (history.isNotEmpty()) listState.animateScrollToItem(history.size - 1)
+    }
+
+    Column(Modifier.fillMaxSize().padding(12.dp)) {
+        MatrixText("INTERACTIVE SHELL", CyanCore, 14, FontWeight.Black)
+        Spacer(Modifier.height(8.dp))
+        if (history.isEmpty()) {
+            Box(Modifier.weight(1f).fillMaxWidth(), contentAlignment = Alignment.Center) {
+                MatrixText("SHELL READY — sh -c <cmd>", GhostDim, 11)
+            }
+        } else {
+            LazyColumn(state = listState, modifier = Modifier.weight(1f).fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                items(history) { h ->
+                    Column(Modifier.fillMaxWidth()) {
+                        MatrixText("$ ${h.command}", CyanCore, 11, FontWeight.Bold)
+                        if (h.output.isNotBlank()) {
+                            MatrixText(h.output.take(4000), if (h.isError) AlertRed else GhostWhite, 10)
+                        }
+                        MatrixText("exit=${h.exitCode}", if (h.isError) AlertRed else GhostDim, 8)
+                    }
+                }
+            }
+        }
+        Row(Modifier.fillMaxWidth().padding(top = 8.dp), verticalAlignment = Alignment.Bottom) {
+            Box(Modifier.weight(1f)) { AbstractInput("COMMAND", cmd) { cmd = it } }
+            Spacer(Modifier.width(8.dp))
+            WireframeButton(if (isRunning) "BUSY" else "RUN", CyanCore, {
+                val c = cmd.trim()
+                if (c.isNotBlank() && !isRunning) { scope.launch { max.terminal.exec(c) }; cmd = "" }
+            }, Modifier.height(44.dp), isActive = isRunning)
+        }
+        if (history.isNotEmpty()) {
+            Spacer(Modifier.height(4.dp))
+            WireframeButton("CLEAR", GhostDim, { max.terminal.clearHistory() }, Modifier.fillMaxWidth())
+        }
+    }
+}
+
+@Composable
+private fun SystemTab(max: MaxSystem) {
+    val res by max.resourceMonitor.state.collectAsState()
+    val net by max.networkStateMonitor.state.collectAsState()
+    val sys by max.systemController.state.collectAsState()
+    val everyday by max.modelManager.everydayState.collectAsState()
+    val coder by max.modelManager.coderState.collectAsState()
+    val enforcement by max.networkGuard.enforcement.collectAsState()
+
+    Column(Modifier.fillMaxSize().padding(12.dp).verticalScroll(rememberScrollState()), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+        MatrixText("DIAGNOSTIC MATRIX", CyanCore, 14, FontWeight.Black)
+
+        @Composable fun line(label: String, value: String, color: Color = GhostWhite) {
+            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
+                MatrixText(label, GhostDim, 10)
+                MatrixText(value, color, 10, FontWeight.Bold)
+            }
+        }
+
+        line("BATTERY", "${res.batteryPct}% ${if (res.isCharging) "(charging)" else ""} ${res.batteryTempC.toInt()}°C")
+        line("CPU", "${res.cpuPercent.toInt()}%")
+        line("RAM", "${res.ramUsedMb}/${res.ramTotalMb} MB (${res.ramUsedPct.toInt()}%)")
+        line("STORAGE", "%.1f / %.1f GB free".format(res.storageFreeGb, res.storageTotalGb))
+        line("THERMAL", res.thermalStatus, if (res.thermalStatus == "Normal") CyanCore else WarningYellow)
+        HorizontalDivider(color = GhostDim.copy(alpha = 0.3f))
+        line("NETWORK", if (net.isConnected) "${net.transportLabel} (${net.signalBars}/4 bars)" else "OFFLINE", if (net.isConnected) CyanCore else AlertRed)
+        line("VALIDATED", if (net.hasValidatedInternet) "yes" else "no")
+        net.ipAddress?.let { line("IP", it) }
+        line("INTERNET POLICY", if (max.networkGuard.isInternetAllowed()) "ALLOWED" else "RECALLED", if (max.networkGuard.isInternetAllowed()) CyanCore else AlertRed)
+        line("ENFORCEMENT", enforcement.name, when (enforcement) {
+            com.max.agent.network.NetworkGuard.Enforcement.ENGAGED -> AlertRed
+            com.max.agent.network.NetworkGuard.Enforcement.NEEDS_CONSENT -> WarningYellow
+            else -> GhostWhite
+        })
+        HorizontalDivider(color = GhostDim.copy(alpha = 0.3f))
+        line("MEDIA VOL", "${sys.mediaVolumePct}%")
+        line("RING VOL", "${sys.ringVolumePct}%")
+        line("RINGER", sys.ringerMode)
+        line("BRIGHTNESS", "${sys.brightnessPct}%")
+        line("WIFI", if (sys.isWifiEnabled) "on" else "off")
+        line("BLUETOOTH", if (sys.isBluetoothEnabled) "on" else "off")
+        line("POWER-SAVE", if (sys.isPowerSaveMode) "on" else "off")
+        HorizontalDivider(color = GhostDim.copy(alpha = 0.3f))
+        line("MODEL PRIMARY", everyday.loadedModel?.name ?: "none")
+        line("MODEL CODER", coder.loadedModel?.name ?: "none")
+        line("GITHUB", if (max.githubEngine.isConfigured()) "configured" else "not configured", if (max.githubEngine.isConfigured()) CyanCore else GhostDim)
+
+        Spacer(Modifier.height(8.dp))
+        WireframeButton("REFRESH", CyanCore, {
+            max.systemController.refreshState()
+            max.networkStateMonitor.refresh()
+        }, Modifier.fillMaxWidth())
+    }
+}
+
+@Composable
+private fun LogTab(max: MaxSystem) {
+    val entries by max.actionLog.entries.collectAsState()
+    val tampered by max.actionLog.tampered.collectAsState()
+    val fmt = remember { SimpleDateFormat("HH:mm:ss", Locale.US) }
+
+    Column(Modifier.fillMaxSize().padding(12.dp)) {
+        MatrixText("AUDIT STREAM", CyanCore, 14, FontWeight.Black)
+        if (tampered) {
+            Box(Modifier.fillMaxWidth().border(2.dp, AlertRed, CutCornerShape(6.dp)).background(AlertRed.copy(alpha = 0.15f)).padding(10.dp)) {
+                MatrixText("⚠ LOG TAMPER DETECTED — SYSTEM LOCKED (RULE 6)", AlertRed, 12, FontWeight.Black)
+            }
+            Spacer(Modifier.height(8.dp))
+        }
+        if (entries.isEmpty()) {
+            Box(Modifier.weight(1f).fillMaxWidth(), contentAlignment = Alignment.Center) {
+                MatrixText("NO ACTIONS RECORDED", GhostDim, 11)
+            }
+        } else {
+            LazyColumn(Modifier.weight(1f).fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                items(entries.reversed()) { e ->
+                    val riskColor = when (e.riskLevel) {
+                        Constitution.RiskLevel.High.label -> AlertRed
+                        Constitution.RiskLevel.Medium.label -> WarningYellow
+                        else -> CyanCore
+                    }
+                    Column(Modifier.fillMaxWidth().border(1.dp, GhostDim.copy(alpha = 0.4f), CutCornerShape(4.dp)).padding(8.dp)) {
+                        Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
+                            MatrixText(fmt.format(Date(e.timestamp)), GhostDim, 9)
+                            MatrixText(e.riskLevel, riskColor, 9, FontWeight.Bold)
+                        }
+                        MatrixText(e.action, GhostWhite, 11, FontWeight.Bold)
+                        MatrixText("by ${e.requestedBy}", GhostDim, 9)
+                        MatrixText(if (e.approved) "✓ ${e.outcome.take(160)}" else "✗ ${e.outcome.take(160)}", if (e.approved) CyanCore else AlertRed, 9)
+                    }
+                }
+            }
+        }
+        Spacer(Modifier.height(8.dp))
+        WireframeButton("PURGE (AUDITED)", AlertRed, {
+            max.actionLog.purge("Owner-initiated purge", max.ownerAuth.ownerName())
+        }, Modifier.fillMaxWidth())
+    }
+}
+
+@Composable
+private fun RulesTab(max: MaxSystem) {
+    var refresh by remember { mutableIntStateOf(0) }
+    val rules = remember(refresh) { MaxIdentity.getRules() }
+    val hasPrompt = remember(refresh) { MaxIdentity.hasCustomPrompt() }
+    var newRule by remember { mutableStateOf("") }
+    var promptDraft by remember { mutableStateOf("") }
+    var inject by remember { mutableStateOf(MaxIdentity.injectLiveContext) }
+
+    Column(Modifier.fillMaxSize().padding(12.dp).verticalScroll(rememberScrollState()), verticalArrangement = Arrangement.spacedBy(10.dp)) {
+        MatrixText("STANDING DIRECTIVES", CyanCore, 14, FontWeight.Black)
+
+        Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
+            MatrixText("INJECT LIVE CONTEXT", GhostWhite, 11)
+            WireframeButton(if (inject) "ON" else "OFF", if (inject) CyanCore else GhostDim, {
+                inject = !inject; MaxIdentity.setInjectLiveContext(inject)
+            }, Modifier.height(34.dp), isActive = inject)
+        }
+
+        MatrixText("CUSTOM PROMPT: ${if (hasPrompt) "ACTIVE (overrides base)" else "default"}", if (hasPrompt) WarningYellow else GhostDim, 10)
+
+        if (rules.isEmpty()) {
+            MatrixText("NO RUNTIME RULES", GhostDim, 11)
+        } else {
+            Column(Modifier.fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                rules.forEachIndexed { i, r ->
+                    Row(Modifier.fillMaxWidth().border(1.dp, GhostDim.copy(alpha = 0.4f), CutCornerShape(4.dp)).padding(8.dp)) {
+                        MatrixText("${i + 1}. $r", GhostWhite, 11)
+                    }
+                }
+            }
+        }
+
+        AbstractInput("NEW DIRECTIVE", newRule, singleLine = false) { newRule = it }
+        WireframeButton("ADD DIRECTIVE", CyanCore, {
+            if (newRule.isNotBlank()) { MaxIdentity.addRule(newRule.trim()); newRule = ""; refresh++ }
+        }, Modifier.fillMaxWidth())
+        WireframeButton("CLEAR ALL DIRECTIVES", AlertRed, {
+            MaxIdentity.clearRules(); refresh++
+        }, Modifier.fillMaxWidth())
+
+        HorizontalDivider(color = GhostDim.copy(alpha = 0.3f))
+        AbstractInput("OVERRIDE SYSTEM PROMPT", promptDraft, singleLine = false) { promptDraft = it }
+        WireframeButton("SET PROMPT", VenomPurple, {
+            if (promptDraft.isNotBlank()) { MaxIdentity.updatePrompt(promptDraft.trim()); refresh++ }
+        }, Modifier.fillMaxWidth())
+    }
+}

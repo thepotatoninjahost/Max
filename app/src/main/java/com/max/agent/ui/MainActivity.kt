@@ -1,8 +1,12 @@
 package com.max.agent.ui
 
+import android.app.Activity
+import android.content.Intent
 import android.os.Bundle
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
+import androidx.activity.result.ActivityResultLauncher
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.*
 import androidx.compose.material3.MaterialTheme
@@ -21,16 +25,26 @@ import com.nexa.sdk.NexaSdk
 class MainActivity : FragmentActivity() {
 
     private lateinit var max: MaxSystem
+    private lateinit var vpnConsentLauncher: ActivityResultLauncher<Intent>
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         enableEdgeToEdge()
+
+        vpnConsentLauncher = registerForActivityResult(
+            ActivityResultContracts.StartActivityForResult()
+        ) { result ->
+            if (result.resultCode == Activity.RESULT_OK && ::max.isInitialized) {
+                max.networkGuard.onEnforcementConsentGranted()
+            }
+        }
 
         var startupError: String? = null
 
         try {
             NexaSdk.getInstance().init(this)
             max = MaxSystem.getInstance(this)
+            max.networkGuard.consentRequester = { intent -> vpnConsentLauncher.launch(intent) }
             max.initialize()
             
             if (intent?.getBooleanExtra("assist_invoked", false) == true) {
