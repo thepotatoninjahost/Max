@@ -201,7 +201,15 @@ class MaxSystem private constructor(val context: Context) {
 
     data class UiMessage(val role: String, val content: String)
     val conversationHistory: SnapshotStateList<UiMessage> = mutableStateListOf()
-
+// Force coder load if available
+val coderEntry = modelManager.getCoderEntry() ?: modelManager.available.value.firstOrNull { 
+    it.name.contains("coder", ignoreCase = true) 
+}
+if (coderEntry != null) {
+    modelManager.loadSlot(ModelManager.Slot.CODER, coderEntry) { success ->
+        android.util.Log.i("MaxSystem", "CODER auto-load: $success")
+    }
+}
     var isGenerating: Boolean by mutableStateOf(false)
         private set
     var streamingText: String by mutableStateOf("")
