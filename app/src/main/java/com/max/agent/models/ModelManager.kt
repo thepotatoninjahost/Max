@@ -102,60 +102,73 @@ class ModelManager(private val context: Context) {
 
 
     fun loadSlot(slot: Slot, entry: ModelEntry, onComplete: (Boolean) -> Unit = {}) {
-        // Baton-pass: free the other slot first so LMKD doesn't kill us on big models.
-        if (slot == Slot.EVERYDAY) releaseSlot(Slot.CODER) else releaseSlot(Slot.EVERYDAY)
+    if (slot == Slot.EVERYDAY) releaseSlot(Slot.CODER) else releaseSlot(Slot.EVERYDAY)
 
-        val stateFlow = if (slot == Slot.EVERYDAY) _everydayState else _coderState
-        stateFlow.value = ModelState(isLoading = true, loadedModel = entry)
+    val stateFlow = if (slot == Slot.EVERYDAY) _everydayState else _coderState
+    stateFlow.value = ModelState(isLoading = true, loadedModel = entry)
 
-        scope.launch {
-            // ---- Pre-flight diagnostics ----
-            // Capture every detail the Nexa native loader cares about so
-            // failures surface with actionable information.
-            val file = File(entry.path)
-            val diag = buildString {
-                append("path=").append(entry.path)
-                append(", exists=").append(file.exists())
-                append(", readable=").append(file.canRead())
-                append(", size=").append(if (file.exists()) file.length() else -1L).append('B')
-                // GGUF magic check — first 4 bytes should spell "GGUF".
-                val magic = runCatching {
-                    file.inputStream().use {
-                        val buf = ByteArray(4)
-                        val n = it.read(buf)
-                        if (n > 0) String(buf, 0, n, Charsets.US_ASCII) else "<empty>"
-                    }
-                }.getOrElse { "<read-failed:${it.javaClass.simpleName}>" }
-                append(", magic=").append(magic)
+    scope.launch {
+        val file = File(entry.path)
+        val diag = "path=${file.absolutePath}, exists=${file.exists()}, readable=${file.canRead()}, size=${file.length()}"
+        android.util.Log.i("ModelManager", "LOAD ATTEMPT $slot: $diag")
+
+        if (!file.exists() || !file.canRead()) {
+            val err = "FILE ERROR: $diag"
+            stateFlow.value = ModelState(error = err)
+            android.util.Log.e("ModelManager", err)
+            onComplete(false)
+            return@launch
+        }
+
+        var wrapper: LlmWrapper? = null
+        val attempts = mutableListOf<String>()
+
+        val configs = listOf(
+            Triple("cpu_gpu", "dev0", 999),  // NPU first
+            Triple("cpu_gpu", "gpu", 999)
+        )
+
+        for ((pluginId, deviceId, layers) in configs) {
+            val label = "$pluginId/$deviceId"
+            try {
+                val input = LlmCreateInput(
+                    model_name = entry.name,
+                    model_path = entry.path,
+                    config = ModelConfig(nCtx = 8192, nGpuLayers = layers, max_tokens = 4096),
+                    plugin_id = pluginId,
+                    device_id = deviceId
+                )
+
+                val result = LlmWrapper.builder().llmCreateInput(input).build()
+                result.onSuccess { w ->
+                    wrapper = w
+                    attempts.add("$label = SUCCESS")
+                    android.util.Log.i("ModelManager", "SUCCESS $slot $label")
+                }.onFailure { e ->
+                    attempts.add("$label = FAIL: ${e.message}")
+                    android.util.Log.w("ModelManager", "FAIL $slot $label: ${e.message}")
+                }
+
+                if (wrapper != null) break
+            } catch (t: Throwable) {
+                attempts.add("$label = CRASH: ${t.javaClass.simpleName}")
+                android.util.Log.e("ModelManager", "CRASH $slot $label", t)
             }
+        }
 
-            if (!file.exists() || !file.canRead()) {
-                stateFlow.value = ModelState(error = "Model file unreachable. $diag")
-                onComplete(false)
-                return@launch
-            }
-
-            // ---- Nexa GGUF LLM load — GPU/NPU ONLY ----
-            // Per https://docs.nexa.ai/en/nexa-sdk-android/APIReference_CPUGPU
-            // and master's hardware policy:
-            //   plugin_id  = "cpu_gpu"   (GGML backend — the only one that accepts GGUF)
-            //   device_id  = "dev0"      Hexagon NPU (Snapdragon 8 Elite / Gen 3+)
-            //   device_id  = "gpu"       Adreno GPU via OpenCL
-            //   nGpuLayers = 999         ALL layers offloaded — no CPU spill
-            //
-            // CPU is explicitly forbidden. If both accelerated paths fail the
-            // model is refused outright instead of silently degrading.
-            val attempts = mutableListOf<String>()
-            var lastError: Throwable? = null
-            var wrapper: LlmWrapper? = null
-
-            // ── HARDWARE POLICY: NPU/GPU only. CPU is FORBIDDEN. ──
-            // Per master directive: Max runs on Hexagon NPU or Adreno GPU only.
-            // If neither accepts the model, refuse to load rather than crawl on CPU.
-            val attemptConfigs = listOf(
-                Triple<String, String?, Int>("cpu_gpu", "dev0", 999),  // Hexagon NPU first (Snapdragon 8 Elite)
-                Triple<String, String?, Int>("cpu_gpu", "gpu",  999)   // Adreno GPU via OpenCL fallback
-            )
+        if (wrapper != null) {
+            if (slot == Slot.EVERYDAY) everydayWrapper = wrapper else coderWrapper = wrapper
+            stateFlow.value = ModelState(isLoaded = true, loadedModel = entry)
+            android.util.Log.i("ModelManager", "FINAL SUCCESS: $slot ${entry.name}")
+            onComplete(true)
+        } else {
+            val err = "LOAD FAILED $slot. Attempts: ${attempts.joinToString(" | ")}"
+            stateFlow.value = ModelState(error = err)
+            android.util.Log.e("ModelManager", err)
+            onComplete(false)
+        }
+    }
+    }
 
             for ((pluginId, deviceId, gpuLayers) in attemptConfigs) {
                 val attemptLabel = "plugin=$pluginId,device=${deviceId ?: "cpu"},gpuLayers=$gpuLayers"
