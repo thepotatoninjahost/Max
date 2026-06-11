@@ -217,18 +217,46 @@ class MaxSystem private constructor(val context: Context) {
      * execute gated tool actions), and update [conversationHistory] live.
      */
     fun sendUserMessage(text: String) {
-        val msg = text.trim()
-        if (msg.isEmpty() || isGenerating) return
-        if (_systemState.value !is SystemState.Ready) return
+    val msg = text.trim()
+    if (msg.isEmpty() || isGenerating) return
+    if (_systemState.value !is SystemState.Ready) return
 
-        conversationHistory.add(UiMessage("user", msg))
-        val assistantIndex = conversationHistory.size
-        conversationHistory.add(UiMessage("assistant", ""))
+    val isCodingTask = msg.contains("code", ignoreCase = true) ||
+                       msg.contains("write", ignoreCase = true) ||
+                       msg.contains("debug", ignoreCase = true) ||
+                       msg.contains("refactor", ignoreCase = true) ||
+                       msg.contains("build", ignoreCase = true) ||
+                       msg.contains("function", ignoreCase = true) ||
+                       msg.contains("class", ignoreCase = true) ||
+                       msg.contains("coder", ignoreCase = true) ||
+                       msg.contains("fix", ignoreCase = true)
 
-        isGenerating = true
-        streamingText = ""
-        stepStatus = ""
+    val slotToUse = if (isCodingTask && modelManager.isSlotLoaded(ModelManager.Slot.CODER)) 
+        ModelManager.Slot.CODER 
+    else ModelManager.Slot.EVERYDAY
 
+    android.util.Log.i("MaxSystem", "ROUTING to $slotToUse for: ${msg.take(100)}")
+
+    conversationHistory.add(UiMessage("user", msg))
+    val assistantIndex = conversationHistory.size
+    conversationHistory.add(UiMessage("assistant", ""))
+
+    isGenerating = true
+    streamingText = ""
+    stepStatus = ""
+
+    val systemPrompt = if (slotToUse == ModelManager.Slot.CODER) {
+        """
+        You are MAX_CODER — pure coding specialist. 
+        ONLY purpose: generate, debug, refactor, architect, test code.
+        Output ONLY clean production-ready commented code + tests + edge cases.
+        Use agency tools when needed. No general conversation.
+        """.trimIndent()
+    } else {
+        MaxIdentity.buildSystemPrompt()
+    }
+
+    // ... rest of your existing code, but pass slotToUse to generation
         val history = conversationHistory
             .take(assistantIndex - 1)
             .map { com.nexa.sdk.bean.ChatMessage(it.role, it.content) }
