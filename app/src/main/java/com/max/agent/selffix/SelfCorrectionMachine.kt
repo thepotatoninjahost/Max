@@ -59,6 +59,8 @@ class SelfCorrectionMachine(
 
     var agentLoop:    AgentLoop?    = null
     var modelManager: ModelManager? = null
+    var patchGenerator: PatchGenerator? = null
+    var hotSwapper: HotSwapper? = null
 
     fun start() {
         loadPersistedQueue()
@@ -90,9 +92,13 @@ class SelfCorrectionMachine(
 
         val ruleFix = tryRuleBasedFix(failure)
         if (ruleFix != null) {
-            a = a.log("✓ Rule fix applied: $ruleFix")
-            finalize(a, Phase.RECOVERED)
-            return@withLock
+            val r = runCatching { terminal.exec(ruleFix) }.getOrNull()
+            if (r != null && r.success) {
+                a = a.log("✓ Rule fix applied and verified: $ruleFix")
+                finalize(a, Phase.RECOVERED)
+                return@withLock
+            }
+            a = a.log("Rule fix did not resolve; escalating. cmd=$ruleFix exit=${r?.exitCode ?: "n/a"}")
         }
 
         val loop = agentLoop
@@ -103,6 +109,47 @@ class SelfCorrectionMachine(
         }
 
         queue(a, failure)
+    }
+
+    /**
+     * Generate a concrete code patch for code-level failures and return it as
+     * extra context the agent loop can act on (commit via GITHUB_WRITE_FILE,
+     * stage in the sandbox, etc). Returns empty string when no patch is produced.
+     */
+    private suspend fun buildPatchContext(failure: FailureDetector.Failure): String {
+        val gen = patchGenerator ?: return ""
+        val mm = modelManager ?: return ""
+        if (!mm.state.value.isLoaded) return ""
+        if (failure.type !in CODE_FAILURES) return ""
+
+        val targetClass = failure.context["class"]
+            ?: failure.stackTrace?.lineSequence()
+                ?.firstOrNull { it.contains("com.max.agent") }
+                ?.substringAfter("at ")?.substringBeforeLast('.')?.trim()
+            ?: "com.max.agent.UnknownClass"
+
+        val web = runCatching {
+            webTroubleshooter.searchForFix(failure.message)
+                .joinToString("\n") { "${it.title}: ${it.snippet}" }
+        }.getOrDefault("")
+
+        val patch = runCatching {
+            gen.generate(
+                errorMessage = failure.message,
+                failedCode = failure.context["code"] ?: "",
+                webContext = web,
+                targetClass = targetClass
+            )
+        }.getOrNull() ?: return ""
+
+        return buildString {
+            appendLine("CANDIDATE PATCH (generated locally, saved to ${patch.savedPath ?: "memory"}):")
+            appendLine("Target class: ${patch.targetClass}")
+            appendLine("```kotlin")
+            appendLine(patch.sourceCode)
+            appendLine("```")
+            appendLine("Review this candidate, correct it if needed, then apply it with GITHUB_WRITE_FILE and GITHUB_TRIGGER_BUILD, or stage it for owner approval. Verify before declaring done.")
+        }
     }
 
     private suspend fun agentFix(
@@ -117,13 +164,20 @@ class SelfCorrectionMachine(
         )
         set(attempt, Phase.AGENT_REASONING)
 
+        val patchContext = runCatching { buildPatchContext(failure) }.getOrDefault("")
+        if (patchContext.isNotBlank()) {
+            attempt = attempt.log("Candidate patch generated; supplying to agent for verification & commit.")
+            set(attempt, Phase.AGENT_REASONING)
+        }
+
         repeat(MAX_RETRIES) { tryIndex ->
             attempt = attempt.log("Attempt ${tryIndex + 1}/3")
             try {
                 val answer = loop.run(
                     systemPrompt = MaxIdentity.buildSystemPrompt(),
                     history      = emptyList(),
-                    userMessage  = buildTask(failure, tryIndex + 1)
+                    userMessage  = buildTask(failure, tryIndex + 1) +
+                        (if (patchContext.isNotBlank()) "\n\n$patchContext" else "")
                 )
                 attempt = attempt.log("✓ $answer")
                 finalize(attempt, Phase.RECOVERED)
@@ -253,5 +307,10 @@ class SelfCorrectionMachine(
         private const val MAX_RETRIES         = 3
         private const val RETRY_BASE_DELAY_MS = 1_000L
         private val BUSY_PHASES = setOf(Phase.DIAGNOSING, Phase.RULE_FIX, Phase.AGENT_REASONING)
+        private val CODE_FAILURES = setOf(
+            FailureDetector.FailureType.CRASH,
+            FailureDetector.FailureType.RUNTIME_EXCEPTION,
+            FailureDetector.FailureType.COMPILATION_ERROR
+        )
     }
 }

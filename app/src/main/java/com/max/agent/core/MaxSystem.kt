@@ -182,7 +182,12 @@ class MaxSystem private constructor(val context: Context) {
     val githubEngine = GithubEngine(context)
     val apkInstaller = ApkInstaller(context)
     val selfCorrectionMachine = SelfCorrectionMachine(context, failureDetector, webTroubleshooter, terminal)
-    
+    val patchGenerator = com.max.agent.selffix.PatchGenerator(modelManager, hotSwapper)
+
+    init {
+        terminal.failureDetector = failureDetector
+    }
+
     val agency = Agency(
         context = context,
         terminal = terminal,
@@ -201,15 +206,7 @@ class MaxSystem private constructor(val context: Context) {
 
     data class UiMessage(val role: String, val content: String)
     val conversationHistory: SnapshotStateList<UiMessage> = mutableStateListOf()
-// Force coder load if available
-val coderEntry = modelManager.getCoderEntry() ?: modelManager.available.value.firstOrNull { 
-    it.name.contains("coder", ignoreCase = true) 
-}
-if (coderEntry != null) {
-    modelManager.loadSlot(ModelManager.Slot.CODER, coderEntry) { success ->
-        android.util.Log.i("MaxSystem", "CODER auto-load: $success")
-    }
-}
+
     var isGenerating: Boolean by mutableStateOf(false)
         private set
     var streamingText: String by mutableStateOf("")
@@ -219,58 +216,69 @@ if (coderEntry != null) {
 
     private var chatJob: Job? = null
 
-    /**
-     * Drive a full agentic turn: build the system prompt (+ live context),
-     * stream tokens from the EVERYDAY model through the AgentLoop (which may
-     * execute gated tool actions), and update [conversationHistory] live.
-     */
-    fun sendUserMessage(text: String) {
-    val msg = text.trim()
-    if (msg.isEmpty() || isGenerating) return
-    if (_systemState.value !is SystemState.Ready) return
-
-    val isCodingTask = msg.contains("code", ignoreCase = true) ||
-                       msg.contains("write", ignoreCase = true) ||
-                       msg.contains("debug", ignoreCase = true) ||
-                       msg.contains("refactor", ignoreCase = true) ||
-                       msg.contains("build", ignoreCase = true) ||
-                       msg.contains("function", ignoreCase = true) ||
-                       msg.contains("class", ignoreCase = true) ||
-                       msg.contains("coder", ignoreCase = true) ||
-                       msg.contains("fix", ignoreCase = true)
-
-    val slotToUse = if (isCodingTask && modelManager.isSlotLoaded(ModelManager.Slot.CODER)) 
-        ModelManager.Slot.CODER 
-    else ModelManager.Slot.EVERYDAY
-
-    android.util.Log.i("MaxSystem", "ROUTING to $slotToUse for: ${msg.take(100)}")
-
-    conversationHistory.add(UiMessage("user", msg))
-    val assistantIndex = conversationHistory.size
-    conversationHistory.add(UiMessage("assistant", ""))
-
-    isGenerating = true
-    streamingText = ""
-    stepStatus = ""
-
-    val systemPrompt = if (slotToUse == ModelManager.Slot.CODER) {
-        """
-        You are MAX_CODER — pure coding specialist. 
-        ONLY purpose: generate, debug, refactor, architect, test code.
-        Output ONLY clean production-ready commented code + tests + edge cases.
-        Use agency tools when needed. No general conversation.
-        """.trimIndent()
-    } else {
-        MaxIdentity.buildSystemPrompt()
+    private fun isCodingTask(msg: String): Boolean {
+        val needles = listOf(
+            "code", "write a", "debug", "refactor", "compile", "function",
+            "class ", "coder", "fix the", "implement", "script", "kotlin",
+            "java", "python", "build"
+        )
+        return needles.any { msg.contains(it, ignoreCase = true) }
     }
 
-    // ... rest of your existing code, but pass slotToUse to generation
+    /**
+     * Drive a full agentic turn: pick the model slot (CODER for coding tasks
+     * when that slot is loaded, otherwise EVERYDAY), build the system prompt
+     * (+ live context), stream tokens through the AgentLoop (which may execute
+     * gated tool actions), and update [conversationHistory] live.
+     */
+    fun sendUserMessage(text: String) {
+        val msg = text.trim()
+        if (msg.isEmpty()) return
+
+        if (msg.equals("STOP NOW", ignoreCase = true)) {
+            stopGeneration()
+            stopNow()
+            return
+        }
+
+        if (isGenerating) return
+        if (_systemState.value !is SystemState.Ready) return
+
+        val slotToUse = if (isCodingTask(msg) && modelManager.isSlotLoaded(ModelManager.Slot.CODER))
+            ModelManager.Slot.CODER
+        else
+            ModelManager.Slot.EVERYDAY
+
+        android.util.Log.i("MaxSystem", "ROUTING to $slotToUse for: ${msg.take(100)}")
+
+        conversationHistory.add(UiMessage("user", msg))
+        val assistantIndex = conversationHistory.size
+        conversationHistory.add(UiMessage("assistant", ""))
+
+        isGenerating = true
+        streamingText = ""
+        stepStatus = ""
+
         val history = conversationHistory
             .take(assistantIndex - 1)
             .map { com.nexa.sdk.bean.ChatMessage(it.role, it.content) }
 
         val systemPrompt = buildString {
-            append(MaxIdentity.buildSystemPrompt())
+            if (slotToUse == ModelManager.Slot.CODER) {
+                append(
+                    """
+                    You are MAX_CODER — a pure coding specialist embedded in the Max agent.
+                    Your ONLY purpose: generate, debug, refactor, architect, and test code.
+                    Output clean, production-ready, fully working code — no stubs, no placeholders,
+                    no truncation. Include edge-case handling. Use the agency tools (SHELL_COMMAND,
+                    READ_FILE, WRITE_FILE, EXECUTE_SCRIPT, GITHUB_*) when you need to inspect or
+                    change files. Emit tool actions as a single <action>{...}</action> JSON object
+                    and STOP. Do not mix prose and action JSON.
+                    """.trimIndent()
+                )
+            } else {
+                append(MaxIdentity.buildSystemPrompt())
+            }
             if (MaxIdentity.injectLiveContext) {
                 append("\n\n")
                 append(runCatching { captureLiveContext() }.getOrDefault(""))
@@ -287,7 +295,7 @@ if (coderEntry != null) {
 
         chatJob = scope.launch {
             val answer = runCatching {
-                agentLoop.run(systemPrompt, history, msg)
+                agentLoop.run(systemPrompt, history, msg, slotToUse)
             }.getOrElse { "Error: ${it.message ?: it.javaClass.simpleName}" }
 
             val finalText = answer.ifBlank { streamingText.ifBlank { "(no response)" } }
@@ -314,6 +322,29 @@ if (coderEntry != null) {
         if (isGenerating) stopGeneration()
         conversationHistory.clear()
         streamingText = ""
+    }
+
+    suspend fun configureGithub(token: String, owner: String, repo: String, branch: String = "main") {
+        githubEngine.configure(token, owner, repo, branch)
+    }
+
+    fun githubConfigured(): Boolean = githubEngine.isConfigured()
+
+    fun startVoiceInput(onText: (String) -> Unit) {
+        voiceEngine.startListening(onResult = onText, onError = {})
+    }
+
+    fun stopVoiceInput() = voiceEngine.stopListening()
+
+    fun speakText(text: String) = voiceEngine.speak(text)
+
+    fun openAccessibilitySettings() {
+        runCatching {
+            context.startActivity(
+                android.content.Intent(android.provider.Settings.ACTION_ACCESSIBILITY_SETTINGS)
+                    .addFlags(android.content.Intent.FLAG_ACTIVITY_NEW_TASK)
+            )
+        }.onFailure { android.util.Log.w("MaxSystem", "open accessibility settings failed: ${it.message}") }
     }
 
     sealed class SystemState {

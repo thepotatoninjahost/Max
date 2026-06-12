@@ -170,64 +170,6 @@ class ModelManager(private val context: Context) {
     }
     }
 
-            for ((pluginId, deviceId, gpuLayers) in attemptConfigs) {
-                val attemptLabel = "plugin=$pluginId,device=${deviceId ?: "cpu"},gpuLayers=$gpuLayers"
-                try {
-                    val result = LlmWrapper.builder()
-                        .llmCreateInput(
-                            LlmCreateInput(
-                                model_name  = "",
-                                model_path  = entry.path,
-                                config      = ModelConfig(
-                                    nCtx        = 4096,
-                                    nGpuLayers  = gpuLayers,
-                                    max_tokens  = 2048
-                                ),
-                                plugin_id   = pluginId,
-                                device_id   = deviceId
-                            )
-                        )
-                        .build()
-
-                    var success = false
-                    result.onSuccess {
-                        wrapper = it
-                        success = true
-                    }.onFailure { lastError = it }
-
-                    if (success) {
-                        attempts.add("$attemptLabel=OK")
-                        break
-                    } else {
-                        attempts.add("$attemptLabel=${lastError?.javaClass?.simpleName}:${lastError?.message}")
-                    }
-                } catch (t: Throwable) {
-                    lastError = t
-                    attempts.add("$attemptLabel=${t.javaClass.simpleName}:${t.message}")
-                }
-            }
-
-            val w = wrapper
-            if (w != null) {
-                if (slot == Slot.EVERYDAY) everydayWrapper = w else coderWrapper = w
-                stateFlow.value = ModelState(
-                    isLoaded   = true,
-                    loadedModel = entry,
-                    error      = null
-                )
-                android.util.Log.i("ModelManager", "Loaded $slot: ${entry.name} via ${attempts.last()}")
-                onComplete(true)
-            } else {
-                val errLine = "Accelerator refused model (no CPU fallback by policy). " +
-                              "Attempts: [${attempts.joinToString("; ")}]. " +
-                              "Last: ${lastError?.javaClass?.simpleName}: ${lastError?.message}. $diag"
-                android.util.Log.e("ModelManager", errLine, lastError)
-                stateFlow.value = ModelState(error = errLine)
-                onComplete(false)
-            }
-        }
-    }
-
     suspend fun loadSlotAsync(slot: Slot, entry: ModelEntry): Boolean {
         val done = kotlinx.coroutines.CompletableDeferred<Boolean>()
         loadSlot(slot, entry) { done.complete(it) }

@@ -16,12 +16,14 @@ class AgentLoop(
     suspend fun run(
         systemPrompt: String,
         history: List<ChatMessage>,
-        userMessage: String
+        userMessage: String,
+        slot: ModelManager.Slot = ModelManager.Slot.EVERYDAY
     ): String = withContext(Dispatchers.IO) {
         
-        val everydayEntry = modelManager.getEverydayEntry() ?: return@withContext "Error: EVERYDAY model not configured."
-        if (!modelManager.isSlotLoaded(ModelManager.Slot.EVERYDAY)) {
-            modelManager.loadSlotAsync(ModelManager.Slot.EVERYDAY, everydayEntry)
+        val entry = modelManager.getSlotEntry(slot)
+            ?: return@withContext "Error: ${slot.name} model not configured."
+        if (!modelManager.isSlotLoaded(slot)) {
+            modelManager.loadSlotAsync(slot, entry)
         }
 
         val messages = mutableListOf(ChatMessage("system", systemPrompt))
@@ -33,16 +35,16 @@ class AgentLoop(
         var finalAnswer = ""
 
         while (currentTurn <= maxTurns) {
-            val prompt = modelManager.applyChatTemplateForSlot(ModelManager.Slot.EVERYDAY, messages) ?: break
+            val prompt = modelManager.applyChatTemplateForSlot(slot, messages) ?: break
             val responseBuilder = StringBuilder()
             var actionParsed: Agency.Action? = null
 
-            modelManager.generateStreamFlowForSlot(ModelManager.Slot.EVERYDAY, prompt).collect { res ->
+            modelManager.generateStreamFlowForSlot(slot, prompt).collect { res ->
                 if (res is LlmStreamResult.Token) {
                     responseBuilder.append(res.text)
                     onToken?.invoke(res.text)
                     if (responseBuilder.length > 8000) {
-                        modelManager.stopSlotStream(ModelManager.Slot.EVERYDAY)
+                        modelManager.stopSlotStream(slot)
                     }
                     if (responseBuilder.contains("</action>")) {
                         actionParsed = agency.parseAction(responseBuilder.toString())
@@ -52,7 +54,7 @@ class AgentLoop(
                             actionParsed = agency.parseAction(json)
                         }
                     }
-                    if (actionParsed != null) modelManager.stopSlotStream(ModelManager.Slot.EVERYDAY)
+                    if (actionParsed != null) modelManager.stopSlotStream(slot)
                 }
             }
 

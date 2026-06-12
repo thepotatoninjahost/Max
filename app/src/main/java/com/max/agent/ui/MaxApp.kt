@@ -218,6 +218,7 @@ fun MaxMainContent(max: MaxSystem) {
                 3 -> SystemTab(max)
                 4 -> LogTab(max)
                 5 -> RulesTab(max)
+                6 -> ConfigTab(max)
             }
         }
 
@@ -274,7 +275,7 @@ private fun OrbitalNav(current: Int, onSelect: (Int) -> Unit) {
     Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.BottomEnd) {
         Box(modifier = Modifier.padding(24.dp), contentAlignment = Alignment.BottomEnd) {
             
-            val tabs = listOf("UPLINK", "CORES", "SHELL", "DIAG", "LOGS", "DIRECTIVES")
+            val tabs = listOf("UPLINK", "CORES", "SHELL", "DIAG", "LOGS", "DIRECTIVES", "CONFIG")
             tabs.forEachIndexed { index, label ->
                 val offset by animateFloatAsState(if (expanded) ((tabs.size - index) * 60f) else 0f, spring(dampingRatio = Spring.DampingRatioMediumBouncy), label = "off")
                 val alpha by animateFloatAsState(if (expanded) 1f else 0f, tween(200), label = "alpha")
@@ -364,6 +365,8 @@ private fun ChatTab(max: MaxSystem) {
     val messages = max.conversationHistory
     val listState = rememberLazyListState()
     var input by remember { mutableStateOf("") }
+    val voiceMode by max.voiceEngine.mode.collectAsState()
+    val listening = voiceMode == VoiceEngine.Mode.LISTENING
 
     LaunchedEffect(messages.size, max.streamingText) {
         if (messages.isNotEmpty()) listState.animateScrollToItem(messages.size - 1)
@@ -407,6 +410,11 @@ private fun ChatTab(max: MaxSystem) {
             Box(Modifier.weight(1f)) {
                 AbstractInput("MESSAGE", input, singleLine = false) { input = it }
             }
+            Spacer(Modifier.width(8.dp))
+            WireframeButton(if (listening) "…" else "MIC", if (listening) WarningYellow else GhostDim, {
+                if (listening) max.stopVoiceInput()
+                else max.startVoiceInput { text -> input = text }
+            }, Modifier.height(44.dp), isActive = listening)
             Spacer(Modifier.width(8.dp))
             if (max.isGenerating) {
                 WireframeButton("STOP", AlertRed, { max.stopGeneration() }, Modifier.height(44.dp))
@@ -686,6 +694,83 @@ private fun RulesTab(max: MaxSystem) {
         AbstractInput("OVERRIDE SYSTEM PROMPT", promptDraft, singleLine = false) { promptDraft = it }
         WireframeButton("SET PROMPT", VenomPurple, {
             if (promptDraft.isNotBlank()) { MaxIdentity.updatePrompt(promptDraft.trim()); refresh++ }
+        }, Modifier.fillMaxWidth())
+    }
+}
+
+@Composable
+private fun ConfigTab(max: MaxSystem) {
+    val scope = rememberCoroutineScope()
+    var refresh by remember { mutableIntStateOf(0) }
+    val configured = remember(refresh) { max.githubEngine.isConfigured() }
+    val existing = remember(refresh) { max.githubEngine.config() }
+
+    var token by remember { mutableStateOf("") }
+    var owner by remember(refresh) { mutableStateOf(existing?.owner ?: "") }
+    var repo by remember(refresh) { mutableStateOf(existing?.repo ?: "") }
+    var branch by remember(refresh) { mutableStateOf(existing?.branch ?: "main") }
+    var status by remember { mutableStateOf("") }
+
+    val voiceCfg by max.voiceEngine.config.collectAsState()
+    val accessibilityActive by MaxAccessibilityService.isActive.collectAsState()
+
+    Column(Modifier.fillMaxSize().padding(12.dp).verticalScroll(rememberScrollState()), verticalArrangement = Arrangement.spacedBy(10.dp)) {
+        MatrixText("SELF-MODIFICATION LINK", CyanCore, 14, FontWeight.Black)
+        MatrixText(
+            if (configured) "GITHUB: CONFIGURED (${existing?.owner}/${existing?.repo}@${existing?.branch})" else "GITHUB: NOT CONFIGURED",
+            if (configured) CyanCore else WarningYellow, 10
+        )
+
+        AbstractInput("PAT TOKEN", token, isPassword = true) { token = it }
+        AbstractInput("OWNER", owner) { owner = it }
+        AbstractInput("REPO", repo) { repo = it }
+        AbstractInput("BRANCH", branch) { branch = it }
+        if (status.isNotBlank()) MatrixText(status, if (status.startsWith("✓")) CyanCore else AlertRed, 10)
+
+        WireframeButton("SAVE LINK", CyanCore, {
+            when {
+                token.isBlank() && !configured -> status = "✗ Token required"
+                owner.isBlank() || repo.isBlank() -> status = "✗ Owner and repo required"
+                else -> scope.launch {
+                    val effectiveToken = token.ifBlank { existing?.token ?: "" }
+                    if (effectiveToken.isBlank()) { status = "✗ Token required"; return@launch }
+                    max.configureGithub(effectiveToken, owner.trim(), repo.trim(), branch.trim().ifBlank { "main" })
+                    token = ""; status = "✓ Link saved"; refresh++
+                }
+            }
+        }, Modifier.fillMaxWidth())
+
+        WireframeButton("CHECK BUILD STATUS", VenomPurple, {
+            scope.launch {
+                val build = runCatching { max.githubEngine.latestBuild() }.getOrNull()
+                status = if (build == null) "✗ No build status (configure link first)"
+                else "✓ run=${build.runId} ${build.status}/${build.conclusion ?: "-"}"
+            }
+        }, Modifier.fillMaxWidth())
+
+        HorizontalDivider(color = GhostDim.copy(alpha = 0.3f))
+        MatrixText("VOICE", CyanCore, 14, FontWeight.Black)
+        Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
+            MatrixText("AUTO-SPEAK REPLIES", GhostWhite, 11)
+            WireframeButton(if (voiceCfg.autoSpeak) "ON" else "OFF", if (voiceCfg.autoSpeak) CyanCore else GhostDim, {
+                max.voiceEngine.updateConfig { copy(autoSpeak = !autoSpeak) }
+            }, Modifier.height(34.dp), isActive = voiceCfg.autoSpeak)
+        }
+        Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
+            MatrixText("PREFER OFFLINE STT", GhostWhite, 11)
+            WireframeButton(if (voiceCfg.preferOffline) "ON" else "OFF", if (voiceCfg.preferOffline) CyanCore else GhostDim, {
+                max.voiceEngine.updateConfig { copy(preferOffline = !preferOffline) }
+            }, Modifier.height(34.dp), isActive = voiceCfg.preferOffline)
+        }
+
+        HorizontalDivider(color = GhostDim.copy(alpha = 0.3f))
+        MatrixText("ACCESSIBILITY BRIDGE", CyanCore, 14, FontWeight.Black)
+        MatrixText(
+            if (accessibilityActive) "SCREEN-READ SERVICE: ACTIVE" else "SCREEN-READ SERVICE: INACTIVE",
+            if (accessibilityActive) CyanCore else WarningYellow, 10
+        )
+        WireframeButton("OPEN ACCESSIBILITY SETTINGS", GhostDim, {
+            max.openAccessibilitySettings()
         }, Modifier.fillMaxWidth())
     }
 }
