@@ -3,6 +3,7 @@ package com.max.agent.models
 import android.content.Context
 import android.database.Cursor
 import android.net.Uri
+import android.os.Environment
 import android.provider.OpenableColumns
 import com.nexa.sdk.LlmWrapper
 import com.nexa.sdk.bean.ChatMessage
@@ -261,14 +262,25 @@ class ModelManager(private val context: Context) {
     // ── Scan ──────────────────────────────────────────────────────────────────
 
     fun scan() {
-        val files = modelsDir.listFiles { f ->
-            f.isFile && f.extension.equals("gguf", ignoreCase = true)
-        } ?: emptyArray<File>()
+        val searchPaths = buildSearchPaths()
+        val allFiles = mutableListOf<File>()
         
-        val current = _everydayState.value.loadedModel
-        _available.value = files.map { f ->
+        for (dir in searchPaths) {
+            val files = dir.listFiles { f ->
+                f.isFile && f.extension.equals("gguf", ignoreCase = true)
+            } ?: emptyArray<File>()
+            allFiles.addAll(files)
+        }
+        
+        android.util.Log.i("ModelManager", "SCAN: Found ${allFiles.size} models in paths: ${searchPaths.map { it.absolutePath }}")
+        
+        val currentEveryday = _everydayState.value.loadedModel
+        val currentCoder = _coderState.value.loadedModel
+        
+        _available.value = allFiles.map { f ->
             ModelEntry(
-                id = current?.path?.let { if (it == f.absolutePath) current.id else null }
+                id = currentEveryday?.path?.let { if (it == f.absolutePath) currentEveryday.id else null }
+                    ?: currentCoder?.path?.let { if (it == f.absolutePath) currentCoder.id else null }
                     ?: UUID.randomUUID().toString(),
                 name = f.nameWithoutExtension,
                 path = f.absolutePath,
@@ -276,6 +288,37 @@ class ModelManager(private val context: Context) {
                 addedAt = f.lastModified()
             )
         }.sortedBy { it.name.lowercase() }
+    }
+
+    private fun buildSearchPaths(): List<File> {
+        val paths = mutableListOf<File>()
+        
+        // 1. App-internal models directory
+        paths.add(modelsDir)
+        
+        // 2. External app-specific directory (doesn't require READ_EXTERNAL_STORAGE)
+        context.getExternalFilesDir(null)?.let { externalFilesDir ->
+            paths.add(File(externalFilesDir, "models"))
+        }
+        
+        // 3. Downloads directory
+        Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DOWNLOADS)?.let { downloads ->
+            if (downloads.exists()) paths.add(downloads)
+        }
+        
+        // 4. Documents directory
+        Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DOCUMENTS)?.let { docs ->
+            if (docs.exists()) paths.add(docs)
+        }
+        
+        // 5. Root external storage (last resort, may fail on scoped storage devices)
+        try {
+            Environment.getExternalStorageDirectory()?.let { root ->
+                if (root.exists()) paths.add(root)
+            }
+        } catch (_: Exception) {}
+        
+        return paths.distinctBy { it.absolutePath }
     }
 
     // ── Load / Release ────────────────────────────────────────────────────────
@@ -404,7 +447,7 @@ class ModelManager(private val context: Context) {
 
     suspend fun stopStream() { stopSlotStream(Slot.EVERYDAY) }
 
-    // ── Helpers ───────────────────────────────────────────────────────────────
+    // ── Helpers ─────────────────────────────────────────────────────────────────
 
     private fun resolveUriMeta(uri: Uri): Pair<String, Long> {
         val cursor: Cursor? = context.contentResolver.query(uri, null, null, null, null)
