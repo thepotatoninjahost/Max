@@ -16,8 +16,8 @@ import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import org.json.JSONObject
 import java.io.*
-import java.security.MessageDigest
 import java.util.UUID
+import kotlin.coroutines.resume
 
 enum class Slot { EVERYDAY, CODER }
 
@@ -118,6 +118,22 @@ class ModelManager(private val context: Context) {
         (if (slot == Slot.EVERYDAY) everydayWrapper else coderWrapper)?.generateStreamFlow(prompt) ?: flowOf("Error: Model not loaded")
 
     fun stopSlotStream(slot: Slot) { (if (slot == Slot.EVERYDAY) everydayWrapper else coderWrapper)?.stopStream() }
+
+    // --- Legacy API Bridge (Fixes CI Crashes) ---
+    suspend fun loadSlotAsync(slot: Slot, entry: ModelEntry): Boolean = suspendCancellableCoroutine { cont ->
+        loadSlot(slot, entry) { success ->
+            if (cont.isActive) cont.resume(success)
+        }
+    }
+
+    fun stopStream() {
+        stopSlotStream(Slot.EVERYDAY)
+        stopSlotStream(Slot.CODER)
+    }
+
+    fun loadSlotConfig() {
+        scope.launch { loadSavedSlots() }
+    }
 
     // --- Architecture Upgrades ---
     private fun preWarmAllModels() {
