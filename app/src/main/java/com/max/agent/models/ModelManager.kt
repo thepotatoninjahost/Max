@@ -72,14 +72,13 @@ class ModelManager(private val context: Context) {
 
     private val errorHandler = CoroutineExceptionHandler { _, t ->
         android.util.Log.e("Max", "Unhandled: ${t.message}", t)
-        try { context.filesDir.resolve("errors.log")
-            .appendText("[${System.currentTimeMillis()}] ${t.javaClass.simpleName}: ${t.message}\n${t.stackTraceToString().take(800)}\n\n") }
-        catch (_: Exception) {}
+        try {
+            context.filesDir.resolve("errors.log")
+                .appendText("[${System.currentTimeMillis()}] ${t.javaClass.simpleName}: ${t.message}\n${t.stackTraceToString().take(800)}\n\n")
+        } catch (_: Exception) {}
     }
 
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO + errorHandler)
-
-    val state: StateFlow<ModelState> get() = everydayState
 
     private val _available = MutableStateFlow<List<ModelEntry>>(emptyList())
     val available: StateFlow<List<ModelEntry>> = _available
@@ -101,74 +100,104 @@ class ModelManager(private val context: Context) {
     private var everydayWrapper: LlmWrapper? = null
     private var coderWrapper: LlmWrapper? = null
 
+    private val modelsDir: File get() = File(context.filesDir, "models").also { it.mkdirs() }
+
+    init {
+        scan() // Initial scan
+    }
+
+    // ── Scan (now only private models directory - reliable) ───────────────────
+
+    fun scan() {
+        val files = modelsDir.listFiles { f ->
+            f.isFile && f.extension.equals("gguf", ignoreCase = true) && f.canRead()
+        } ?: emptyArray()
+
+        android.util.Log.i("ModelManager", "SCAN: Found ${files.size} models in private models dir")
+
+        val currentEveryday = _everydayState.value.loadedModel
+        val currentCoder = _coderState.value.loadedModel
+
+        _available.value = files.map { f ->
+            ModelEntry(
+                id = currentEveryday?.path?.takeIf { it == f.absolutePath }?.let { currentEveryday.id }
+                    ?: currentCoder?.path?.takeIf { it == f.absolutePath }?.let { currentCoder.id }
+                    ?: UUID.randomUUID().toString(),
+                name = f.nameWithoutExtension,
+                path = f.absolutePath,
+                sizeBytes = f.length(),
+                addedAt = f.lastModified()
+            )
+        }.sortedBy { it.name.lowercase() }
+    }
 
     fun loadSlot(slot: Slot, entry: ModelEntry, onComplete: (Boolean) -> Unit = {}) {
-    if (slot == Slot.EVERYDAY) releaseSlot(Slot.CODER) else releaseSlot(Slot.EVERYDAY)
+        if (slot == Slot.EVERYDAY) releaseSlot(Slot.CODER) else releaseSlot(Slot.EVERYDAY)
 
-    val stateFlow = if (slot == Slot.EVERYDAY) _everydayState else _coderState
-    stateFlow.value = ModelState(isLoading = true, loadedModel = entry)
+        val stateFlow = if (slot == Slot.EVERYDAY) _everydayState else _coderState
+        stateFlow.value = ModelState(isLoading = true, loadedModel = entry)
 
-    scope.launch {
-        val file = File(entry.path)
-        val diag = "path=${file.absolutePath}, exists=${file.exists()}, readable=${file.canRead()}, size=${file.length()}"
-        android.util.Log.i("ModelManager", "LOAD ATTEMPT $slot: $diag")
+        scope.launch {
+            val file = File(entry.path)
+            val diag = "path=${file.absolutePath}, exists=${file.exists()}, readable=${file.canRead()}, size=${file.length()}"
+            android.util.Log.i("ModelManager", "LOAD ATTEMPT $slot: $diag")
 
-        if (!file.exists() || !file.canRead()) {
-            val err = "FILE ERROR: $diag"
-            stateFlow.value = ModelState(error = err)
-            android.util.Log.e("ModelManager", err)
-            onComplete(false)
-            return@launch
-        }
+            if (!file.exists() || !file.canRead()) {
+                val err = "FILE ERROR: $diag"
+                stateFlow.value = ModelState(error = err)
+                android.util.Log.e("ModelManager", err)
+                onComplete(false)
+                return@launch
+            }
 
-        var wrapper: LlmWrapper? = null
-        val attempts = mutableListOf<String>()
+            var wrapper: LlmWrapper? = null
+            val attempts = mutableListOf<String>()
 
-        val configs = listOf(
-            Triple("cpu_gpu", "dev0", 999),  // NPU first
-            Triple("cpu_gpu", "gpu", 999)
-        )
+            val configs = listOf(
+                Triple("cpu_gpu", "dev0", 999),  // NPU first
+                Triple("cpu_gpu", "gpu", 999)
+            )
 
-        for ((pluginId, deviceId, layers) in configs) {
-            val label = "$pluginId/$deviceId"
-            try {
-                val input = LlmCreateInput(
-                    model_name = entry.name,
-                    model_path = entry.path,
-                    config = ModelConfig(nCtx = 8192, nGpuLayers = layers, max_tokens = 4096),
-                    plugin_id = pluginId,
-                    device_id = deviceId
-                )
+            for ((pluginId, deviceId, layers) in configs) {
+                val label = "$pluginId/$deviceId"
+                try {
+                    val input = LlmCreateInput(
+                        model_name = entry.name,
+                        model_path = entry.path,
+                        config = ModelConfig(nCtx = 8192, nGpuLayers = layers, max_tokens = 4096),
+                        plugin_id = pluginId,
+                        device_id = deviceId
+                    )
 
-                val result = LlmWrapper.builder().llmCreateInput(input).build()
-                result.onSuccess { w ->
-                    wrapper = w
-                    attempts.add("$label = SUCCESS")
-                    android.util.Log.i("ModelManager", "SUCCESS $slot $label")
-                }.onFailure { e ->
-                    attempts.add("$label = FAIL: ${e.message}")
-                    android.util.Log.w("ModelManager", "FAIL $slot $label: ${e.message}")
+                    val result = LlmWrapper.builder().llmCreateInput(input).build()
+                    result.onSuccess { w ->
+                        wrapper = w
+                        attempts.add("$label = SUCCESS")
+                        android.util.Log.i("ModelManager", "SUCCESS $slot $label")
+                    }.onFailure { e ->
+                        attempts.add("$label = FAIL: ${e.message}")
+                        android.util.Log.w("ModelManager", "FAIL $slot $label: ${e.message}")
+                    }
+
+                    if (wrapper != null) break
+                } catch (t: Throwable) {
+                    attempts.add("$label = CRASH: ${t.javaClass.simpleName}")
+                    android.util.Log.e("ModelManager", "CRASH $slot $label", t)
                 }
+            }
 
-                if (wrapper != null) break
-            } catch (t: Throwable) {
-                attempts.add("$label = CRASH: ${t.javaClass.simpleName}")
-                android.util.Log.e("ModelManager", "CRASH $slot $label", t)
+            if (wrapper != null) {
+                if (slot == Slot.EVERYDAY) everydayWrapper = wrapper else coderWrapper = wrapper
+                stateFlow.value = ModelState(isLoaded = true, loadedModel = entry)
+                android.util.Log.i("ModelManager", "FINAL SUCCESS: $slot ${entry.name}")
+                onComplete(true)
+            } else {
+                val err = "LOAD FAILED $slot. Attempts: ${attempts.joinToString(" | ")}"
+                stateFlow.value = ModelState(error = err)
+                android.util.Log.e("ModelManager", err)
+                onComplete(false)
             }
         }
-
-        if (wrapper != null) {
-            if (slot == Slot.EVERYDAY) everydayWrapper = wrapper else coderWrapper = wrapper
-            stateFlow.value = ModelState(isLoaded = true, loadedModel = entry)
-            android.util.Log.i("ModelManager", "FINAL SUCCESS: $slot ${entry.name}")
-            onComplete(true)
-        } else {
-            val err = "LOAD FAILED $slot. Attempts: ${attempts.joinToString(" | ")}"
-            stateFlow.value = ModelState(error = err)
-            android.util.Log.e("ModelManager", err)
-            onComplete(false)
-        }
-    }
     }
 
     suspend fun loadSlotAsync(slot: Slot, entry: ModelEntry): Boolean {
@@ -221,7 +250,7 @@ class ModelManager(private val context: Context) {
         slotConfigFile.parentFile?.mkdirs()
         slotConfigFile.writeText(org.json.JSONObject().apply {
             everydayPath?.let { put("everyday", it) }
-            coderPath?.let   { put("coder",     it) }
+            coderPath?.let { put("coder", it) }
         }.toString())
     }
 
@@ -229,14 +258,13 @@ class ModelManager(private val context: Context) {
         val config = runCatching {
             org.json.JSONObject(slotConfigFile.readText())
         }.getOrNull() ?: return null
-        val key  = if (slot == Slot.EVERYDAY) "everyday" else "coder"
+        val key = if (slot == Slot.EVERYDAY) "everyday" else "coder"
         val path = config.optString(key).ifBlank { return null }
-        
-        // Fix: Operator must remain on the same line as the return expression to prevent Kotlin parser crash.
+
         return _available.value.firstOrNull { it.path == path } ?: ModelEntry(
-            name      = java.io.File(path).nameWithoutExtension,
-            path      = path,
-            sizeBytes = java.io.File(path).length()
+            name = File(path).nameWithoutExtension,
+            path = path,
+            sizeBytes = File(path).length()
         )
     }
 
@@ -245,7 +273,7 @@ class ModelManager(private val context: Context) {
         return _available.value.firstOrNull { it.path == path }
     }
 
-    fun getCoderEntry()    = getSlotEntry(Slot.CODER)
+    fun getCoderEntry() = getSlotEntry(Slot.CODER)
     fun getEverydayEntry() = getSlotEntry(Slot.EVERYDAY)
 
     fun loadSlotConfig(): Pair<String?, String?> {
@@ -253,72 +281,8 @@ class ModelManager(private val context: Context) {
         return try {
             val obj = org.json.JSONObject(slotConfigFile.readText())
             Pair(obj.optString("everyday").takeIf { it.isNotBlank() },
-                 obj.optString("coder").takeIf     { it.isNotBlank() })
+                 obj.optString("coder").takeIf { it.isNotBlank() })
         } catch (e: Exception) { Pair(null, null) }
-    }
-
-    private val modelsDir: File get() = File(context.filesDir, "models").also { it.mkdirs() }
-
-    // ── Scan ──────────────────────────────────────────────────────────────────
-
-    fun scan() {
-        val searchPaths = buildSearchPaths()
-        val allFiles = mutableListOf<File>()
-        
-        for (dir in searchPaths) {
-            val files = dir.listFiles { f ->
-                f.isFile && f.extension.equals("gguf", ignoreCase = true)
-            } ?: emptyArray<File>()
-            allFiles.addAll(files)
-        }
-        
-        android.util.Log.i("ModelManager", "SCAN: Found ${allFiles.size} models in paths: ${searchPaths.map { it.absolutePath }}")
-        
-        val currentEveryday = _everydayState.value.loadedModel
-        val currentCoder = _coderState.value.loadedModel
-        
-        _available.value = allFiles.map { f ->
-            ModelEntry(
-                id = currentEveryday?.path?.let { if (it == f.absolutePath) currentEveryday.id else null }
-                    ?: currentCoder?.path?.let { if (it == f.absolutePath) currentCoder.id else null }
-                    ?: UUID.randomUUID().toString(),
-                name = f.nameWithoutExtension,
-                path = f.absolutePath,
-                sizeBytes = f.length(),
-                addedAt = f.lastModified()
-            )
-        }.sortedBy { it.name.lowercase() }
-    }
-
-    private fun buildSearchPaths(): List<File> {
-        val paths = mutableListOf<File>()
-        
-        // 1. App-internal models directory
-        paths.add(modelsDir)
-        
-        // 2. External app-specific directory (doesn't require READ_EXTERNAL_STORAGE)
-        context.getExternalFilesDir(null)?.let { externalFilesDir ->
-            paths.add(File(externalFilesDir, "models"))
-        }
-        
-        // 3. Downloads directory
-        Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DOWNLOADS)?.let { downloads ->
-            if (downloads.exists()) paths.add(downloads)
-        }
-        
-        // 4. Documents directory
-        Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DOCUMENTS)?.let { docs ->
-            if (docs.exists()) paths.add(docs)
-        }
-        
-        // 5. Root external storage (last resort, may fail on scoped storage devices)
-        try {
-            Environment.getExternalStorageDirectory()?.let { root ->
-                if (root.exists()) paths.add(root)
-            }
-        } catch (_: Exception) {}
-        
-        return paths.distinctBy { it.absolutePath }
     }
 
     // ── Load / Release ────────────────────────────────────────────────────────
@@ -343,7 +307,7 @@ class ModelManager(private val context: Context) {
         scan()
     }
 
-    // ── SAF Import ────────────────────────────────────────────────────────────
+    // ── SAF Import (the reliable way) ────────────────────────────────────────
 
     fun importFromUri(uri: Uri, onComplete: (Boolean) -> Unit = {}) {
         if (_transfer.value.active) return
@@ -379,7 +343,7 @@ class ModelManager(private val context: Context) {
         }
     }
 
-    // ── Download ──────────────────────────────────────────────────────────────
+    // ── Download (optional but kept) ─────────────────────────────────────────
 
     fun downloadModel(url: String, fileName: String, onComplete: (Boolean) -> Unit = {}) {
         if (_transfer.value.active) return
@@ -393,7 +357,7 @@ class ModelManager(private val context: Context) {
             try {
                 val conn = (URL(url).openConnection() as HttpURLConnection).apply {
                     connectTimeout = 15_000
-                    readTimeout    = 60_000
+                    readTimeout = 60_000
                     connect()
                 }
                 val total = conn.contentLengthLong
