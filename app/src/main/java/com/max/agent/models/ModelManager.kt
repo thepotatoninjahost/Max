@@ -69,16 +69,16 @@ class ModelManager(private val context: Context) {
     private val metadataDir = File(context.filesDir, "model_metadata").also { it.mkdirs() }
 
     val available: StateFlow<List<ModelEntry>> = MutableStateFlow(emptyList())
-    private val _available get() = available as MutableStateFlow
+    private val _available get() = available as MutableStateFlow<List<ModelEntry>>
 
     val transfer: StateFlow<TransferState> = MutableStateFlow(TransferState())
-    private val _transfer get() = transfer as MutableStateFlow
+    private val _transfer get() = transfer as MutableStateFlow<TransferState>
 
     val everydayState: StateFlow<ModelState> = MutableStateFlow(ModelState())
-    private val _everydayState get() = everydayState as MutableStateFlow
+    private val _everydayState get() = everydayState as MutableStateFlow<ModelState>
 
     val coderState: StateFlow<ModelState> = MutableStateFlow(ModelState())
-    private val _coderState get() = coderState as MutableStateFlow
+    private val _coderState get() = coderState as MutableStateFlow<ModelState>
 
     init {
         loadSavedSlots()
@@ -287,9 +287,9 @@ class ModelManager(private val context: Context) {
         val dynamicContext = if (availableRamGb >= 12) entry.contextLength else 16384
 
         val configs = listOf(
-            Triple("qnn", "npu", optimalLayers),         // Targets Qualcomm Hexagon NPU
-            Triple("vulkan", "gpu", optimalLayers),      // Targets Snapdragon Adreno GPU
-            Triple("cpu", "cpu", 0)                      // Absolute fallback
+            Triple("qnn", "npu", optimalLayers),
+            Triple("vulkan", "gpu", optimalLayers),
+            Triple("cpu", "cpu", 0)
         )
 
         for ((backend, device, layers) in configs) {
