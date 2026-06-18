@@ -19,6 +19,8 @@ import java.net.URL
 import java.security.MessageDigest
 import java.util.UUID
 
+enum class Slot { EVERYDAY, CODER }
+
 data class ModelEntry(
     val id: String,
     val name: String,
@@ -47,8 +49,6 @@ data class TransferState(
     val error: String? = null
 )
 
-enum class Slot { EVERYDAY, CODER }
-
 class ModelManager(private val context: Context) {
 
     private val errorHandler = CoroutineExceptionHandler { _, t ->
@@ -57,7 +57,6 @@ class ModelManager(private val context: Context) {
     }
 
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO + errorHandler)
-
     private val downloadMutex = Mutex()
     private val downloadQueue = mutableListOf<Job>()
     private val loadJobs = mutableMapOf<Slot, Job>()
@@ -93,28 +92,58 @@ class ModelManager(private val context: Context) {
         downloadQueue.forEach { it.cancel() }
     }
 
+    // --- Public API ---
+    fun isSlotLoaded(slot: Slot): Boolean = (if (slot == Slot.EVERYDAY) everydayWrapper else coderWrapper) != null
+
+    fun getSlotEntry(slot: Slot): ModelEntry? = (if (slot == Slot.EVERYDAY) everydayState.value else coderState.value).loadedModel
+
+    fun getModelByPath(path: String): ModelEntry? = available.value.find { it.path == path }
+
+    fun deleteModel(entry: ModelEntry) {
+        scope.launch {
+            File(entry.path).delete()
+            File(metadataDir, "${File(entry.path).name}.json").delete()
+            scan()
+        }
+    }
+
+    fun cancelTransfer() {
+        downloadQueue.forEach { it.cancel() }
+        _transfer.value = TransferState()
+    }
+
+    fun clearTransferError() { _transfer.value = _transfer.value.copy(error = null) }
+
+    fun applyChatTemplateForSlot(slot: Slot, prompt: String): String = 
+        (if (slot == Slot.EVERYDAY) everydayWrapper else coderWrapper)?.applyChatTemplate(prompt) ?: prompt
+
+    fun generateStreamFlowForSlot(slot: Slot, prompt: String): Flow<String> = 
+        (if (slot == Slot.EVERYDAY) everydayWrapper else coderWrapper)?.generateStreamFlow(prompt) ?: flowOf("Error: Model not loaded")
+
+    fun stopSlotStream(slot: Slot) { (if (slot == Slot.EVERYDAY) everydayWrapper else coderWrapper)?.stopStream() }
+
+    // --- Core Logic ---
     private fun appendErrorLog(t: Throwable) {
-        try {
-            context.filesDir.resolve("errors.log").appendText("${System.currentTimeMillis()}: ${t.message}\n")
-        } catch (_: Exception) {}
+        try { context.filesDir.resolve("errors.log").appendText("${System.currentTimeMillis()}: ${t.message}\n") } catch (_: Exception) {}
+    }
+
+    private fun InputStream.readInt(): Int {
+        val b = ByteArray(4)
+        return if (read(b) == 4) {
+            ((b[0].toInt() and 0xFF) shl 24) or ((b[1].toInt() and 0xFF) shl 16) or ((b[2].toInt() and 0xFF) shl 8) or (b[3].toInt() and 0xFF)
+        } else -1
     }
 
     private fun validateGguf(file: File): Boolean {
         if (!file.exists() || file.length() < 4) return false
-        return try {
-            FileInputStream(file).use { it.readInt() == 0x47475546 }
-        } catch (e: Exception) { false }
+        return try { FileInputStream(file).use { it.readInt() == 0x47475546 } } catch (e: Exception) { false }
     }
 
-    // === Metadata & Scan ===
     private fun saveMetadata(file: File, entry: ModelEntry) {
         try {
             val json = JSONObject().apply {
-                put("id", entry.id)
-                put("addedAt", entry.addedAt)
-                put("sha256", entry.sha256)
-                put("contextLength", entry.contextLength)
-                put("paramSize", entry.paramSize)
+                put("id", entry.id); put("addedAt", entry.addedAt); put("sha256", entry.sha256)
+                put("contextLength", entry.contextLength); put("paramSize", entry.paramSize)
             }
             File(metadataDir, "${file.name}.json").writeText(json.toString())
         } catch (_: Exception) {}
@@ -122,54 +151,36 @@ class ModelManager(private val context: Context) {
 
     private fun restoreOrGenerateEntry(file: File): ModelEntry {
         val metaFile = File(metadataDir, "${file.name}.json")
-        return if (metaFile.exists()) {
+        if (metaFile.exists()) {
             try {
                 val json = JSONObject(metaFile.readText())
-                ModelEntry(
-                    id = json.getString("id"),
-                    name = file.nameWithoutExtension,
-                    path = file.absolutePath,
-                    sizeBytes = file.length(),
-                    addedAt = json.optLong("addedAt", file.lastModified()),
-                    sha256 = json.optString("sha256").takeIf { it.isNotEmpty() },
-                    contextLength = json.optInt("contextLength", 32768),
-                    paramSize = json.optString("paramSize").takeIf { it.isNotEmpty() }
-                )
-            } catch (_: Exception) {
-                generateEntry(file)
-            }
-        } else generateEntry(file)
+                return ModelEntry(json.getString("id"), file.nameWithoutExtension, file.absolutePath, file.length(), 
+                    json.optLong("addedAt", file.lastModified()), json.optString("sha256").takeIf { it.isNotEmpty() }, 
+                    json.optInt("contextLength", 32768), json.optString("paramSize").takeIf { it.isNotEmpty() })
+            } catch (_: Exception) {}
+        }
+        return generateEntry(file)
     }
 
     private fun generateEntry(file: File): ModelEntry {
-        val id = UUID.randomUUID().toString()
-        val entry = ModelEntry(id, file.nameWithoutExtension, file.absolutePath, file.length(), file.lastModified())
+        val entry = ModelEntry(UUID.randomUUID().toString(), file.nameWithoutExtension, file.absolutePath, file.length(), file.lastModified())
         saveMetadata(file, entry)
         return entry
     }
 
     fun scan() {
-        val files = modelsDir.listFiles { f ->
-            f.isFile && f.extension.equals("gguf", ignoreCase = true) && f.canRead()
-        } ?: emptyArray()
-
+        val files = modelsDir.listFiles { f -> f.isFile && f.extension.equals("gguf", ignoreCase = true) && f.canRead() } ?: emptyArray()
         _available.value = files.mapNotNull { f ->
-            if (!validateGguf(f)) {
-                f.delete()
-                return@mapNotNull null
-            }
-            restoreOrGenerateEntry(f)
+            if (!validateGguf(f)) { f.delete(); null } else restoreOrGenerateEntry(f)
         }.sortedBy { it.name.lowercase() }
     }
 
-    // === Download with Queue ===
     fun downloadModel(url: String, fileName: String, expectedSha256: String? = null, onComplete: (Boolean) -> Unit = {}) {
         scope.launch {
             downloadMutex.withLock {
                 if (downloadQueue.any { it.isActive }) {
                     _transfer.value = TransferState(error = "One download at a time")
-                    onComplete(false)
-                    return@launch
+                    onComplete(false); return@launch
                 }
                 val job = scope.launch { performDownload(url, fileName, expectedSha256, onComplete) }
                 downloadQueue.add(job)
@@ -185,24 +196,14 @@ class ModelManager(private val context: Context) {
             val safeName = ensureGgufExtension(fileName)
             destFile = File(modelsDir, safeName)
             if (destFile.exists()) throw Exception("Model already exists")
-
             val size = getRemoteSize(url)
             if (size > 0 && !hasEnoughSpace(size)) throw Exception("Insufficient storage")
-
             _transfer.value = TransferState(active = true, label = "Downloading $safeName", fileName = safeName, totalBytes = size)
-
             val success = streamWithProgress(url, destFile) { done, total ->
-                _transfer.value = _transfer.value.copy(
-                    bytesTransferred = done,
-                    progress = if (total > 0) done.toFloat() / total else 0f
-                )
+                _transfer.value = _transfer.value.copy(bytesTransferred = done, progress = if (total > 0) done.toFloat() / total else 0f)
             }
-
             if (!success || !validateGguf(destFile)) throw Exception("Invalid download")
-            if (expectedSha256 != null && !verifySha256(destFile, expectedSha256)) {
-                throw Exception("SHA256 check failed")
-            }
-
+            if (expectedSha256 != null && !verifySha256(destFile, expectedSha256)) throw Exception("SHA256 check failed")
             scan()
             _transfer.value = TransferState()
             onComplete(true)
@@ -214,17 +215,11 @@ class ModelManager(private val context: Context) {
     }
 
     private fun getRemoteSize(url: String): Long = try {
-        (URL(url).openConnection() as HttpURLConnection).apply {
-            requestMethod = "HEAD"
-            connectTimeout = 15000
-            readTimeout = 15000
-        }.use { it.contentLengthLong }
+        (URL(url).openConnection() as HttpURLConnection).apply { requestMethod = "HEAD"; connectTimeout = 15000; readTimeout = 15000 }.use { it.contentLengthLong }
     } catch (e: Exception) { -1L }
 
     private suspend fun streamWithProgress(url: String, dest: File, onProgress: (Long, Long) -> Unit): Boolean = withContext(Dispatchers.IO) {
-        val conn = (URL(url).openConnection() as HttpURLConnection).apply {
-            connectTimeout = 30000; readTimeout = 60000
-        }
+        val conn = (URL(url).openConnection() as HttpURLConnection).apply { connectTimeout = 30000; readTimeout = 60000 }
         conn.connect()
         val total = conn.contentLengthLong
         conn.inputStream.use { input ->
@@ -248,124 +243,66 @@ class ModelManager(private val context: Context) {
         FileInputStream(file).use { input ->
             val buffer = ByteArray(8192)
             var bytesRead: Int
-            while (input.read(buffer).also { bytesRead = it } != -1) {
-                digest.update(buffer, 0, bytesRead)
-            }
+            while (input.read(buffer).also { bytesRead = it } != -1) digest.update(buffer, 0, bytesRead)
         }
         digest.digest().joinToString("") { "%02x".format(it) } == expected.lowercase()
     } catch (e: Exception) { false }
 
-    // === Import from URI ===
     fun importFromUri(uri: Uri, onComplete: (Boolean) -> Unit = {}) {
         scope.launch {
             var dest: File? = null
             try {
-                val cursor: Cursor? = context.contentResolver.query(uri, arrayOf(OpenableColumns.DISPLAY_NAME, OpenableColumns.SIZE), null, null, null)
-                val name = (cursor?.use {
-                    it.moveToFirst()
-                    it.getString(0)
-                } ?: "imported.gguf").let { ensureGgufExtension(it) }
-
-                dest = File(modelsDir, name)
+                val cursor = context.contentResolver.query(uri, arrayOf(OpenableColumns.DISPLAY_NAME, OpenableColumns.SIZE), null, null, null)
+                val name = cursor?.use { if (it.moveToFirst()) it.getString(0) else "imported.gguf" } ?: "imported.gguf"
+                dest = File(modelsDir, ensureGgufExtension(name))
                 if (dest.exists()) throw Exception("Already exists")
-
-                val size = cursor?.use { it.getLong(1) } ?: -1L
-                if (size > 0 && !hasEnoughSpace(size)) throw Exception("No space")
-
                 context.contentResolver.openInputStream(uri)?.use { input ->
-                    FileOutputStream(dest).use { output ->
-                        input.copyTo(output, 2 * 1024 * 1024)
-                    }
-                } ?: throw Exception("Cannot read URI")
-
-                if (!validateGguf(dest)) throw Exception("Invalid GGUF")
-                scan()
-                onComplete(true)
-            } catch (e: Exception) {
-                dest?.delete()
-                onComplete(false)
-            }
+                    FileOutputStream(dest).use { output -> input.copyTo(output) }
+                } ?: throw Exception("Read error")
+                if (!validateGguf(dest)) throw Exception("Invalid")
+                scan(); onComplete(true)
+            } catch (e: Exception) { dest?.delete(); onComplete(false) }
         }
     }
 
-    // === Loading ===
     fun loadSlot(slot: Slot, entry: ModelEntry, onComplete: (Boolean) -> Unit = {}) {
         loadJobs[slot]?.cancel()
         if (slot == Slot.EVERYDAY) releaseSlot(Slot.CODER) else releaseSlot(Slot.EVERYDAY)
-
         val stateFlow = if (slot == Slot.EVERYDAY) _everydayState else _coderState
         stateFlow.value = ModelState(isLoading = true, loadedModel = entry)
-
         loadJobs[slot] = scope.launch {
-            val success = withTimeoutOrNull(180_000L) {
-                tryLoadWithFallbacks(slot, entry, stateFlow)
-            } ?: false
-
-            if (!success) stateFlow.value = ModelState(error = "Load failed or timed out")
+            val success = tryLoadWithFallbacks(slot, entry, stateFlow)
+            if (!success) stateFlow.value = ModelState(error = "Load failed")
             onComplete(success)
         }
     }
 
     private suspend fun tryLoadWithFallbacks(slot: Slot, entry: ModelEntry, stateFlow: MutableStateFlow<ModelState>): Boolean {
-        val file = File(entry.path)
-        if (!file.exists() || !validateGguf(file)) {
-            stateFlow.value = ModelState(error = "Invalid GGUF")
-            return false
-        }
-
-        val configs = listOf(
-            Triple("npu", "dev0", 999),
-            Triple("npu", null, 999),
-            Triple("cpu_gpu", "dev0", 999),
-            Triple("cpu_gpu", "gpu", 80),
-            Triple("cpu_gpu", null, 40)
-        )
-
-        for ((pluginId, deviceId, layers) in configs) {
+        val configs = listOf(Triple("npu", "dev0", 999), Triple("cpu_gpu", "gpu", 80))
+        for ((p, d, l) in configs) {
             try {
-                val input = LlmCreateInput(
-                    model_name = entry.name,
-                    model_path = entry.path,
-                    config = ModelConfig(nCtx = 32768, nGpuLayers = layers, max_tokens = 16384),
-                    plugin_id = pluginId,
-                    device_id = deviceId
-                )
-                val result = LlmWrapper.builder().llmCreateInput(input).build()
+                val result = LlmWrapper.builder().llmCreateInput(LlmCreateInput(entry.name, entry.path, ModelConfig(32768, l, 16384), p, d)).build()
                 if (result.isSuccess) {
-                    assignWrapper(slot, result.getOrThrow())
+                    if (slot == Slot.EVERYDAY) everydayWrapper = result.getOrThrow() else coderWrapper = result.getOrThrow()
                     stateFlow.value = ModelState(isLoaded = true, loadedModel = entry)
-                    saveSlotConfig(slot, entry)
-                    Log.i("ModelManager", "Loaded ${entry.name} on $pluginId/$deviceId")
-                    return true
+                    saveSlotConfig(slot, entry); return true
                 }
-            } catch (e: Exception) {
-                Log.w("ModelManager", "Failed $pluginId/$deviceId: ${e.message}")
-            }
+            } catch (_: Exception) {}
         }
-        stateFlow.value = ModelState(error = "All acceleration paths failed")
         return false
-    }
-
-    private fun assignWrapper(slot: Slot, wrapper: LlmWrapper) {
-        if (slot == Slot.EVERYDAY) everydayWrapper = wrapper else coderWrapper = wrapper
     }
 
     fun releaseSlot(slot: Slot) {
         loadJobs[slot]?.cancel()
-        val wrapper = if (slot == Slot.EVERYDAY) everydayWrapper else coderWrapper
-        try { wrapper?.close() } catch (_: Exception) {}
-        if (slot == Slot.EVERYDAY) everydayWrapper = null else coderWrapper = null
-        val stateFlow = if (slot == Slot.EVERYDAY) _everydayState else _coderState
-        stateFlow.value = ModelState()
+        if (slot == Slot.EVERYDAY) { everydayWrapper?.close(); everydayWrapper = null; _everydayState.value = ModelState() }
+        else { coderWrapper?.close(); coderWrapper = null; _coderState.value = ModelState() }
     }
 
-    // === Persistence ===
-    private fun saveSlotConfig(slot: Slot, entry: ModelEntry) {
+    fun saveSlotConfig(slot: Slot, entry: ModelEntry) {
         try {
-            val current = if (slotConfigFile.exists()) JSONObject(slotConfigFile.readText()) else JSONObject()
-            current.put("everyday", if (slot == Slot.EVERYDAY) entry.path else current.optString("everyday"))
-            current.put("coder", if (slot == Slot.CODER) entry.path else current.optString("coder"))
-            slotConfigFile.writeText(current.toString())
+            val json = if (slotConfigFile.exists()) JSONObject(slotConfigFile.readText()) else JSONObject()
+            json.put(if (slot == Slot.EVERYDAY) "everyday" else "coder", entry.path)
+            slotConfigFile.writeText(json.toString())
         } catch (_: Exception) {}
     }
 
@@ -376,21 +313,11 @@ class ModelManager(private val context: Context) {
             listOf(Slot.EVERYDAY to "everyday", Slot.CODER to "coder").forEach { (slot, key) ->
                 val path = json.optString(key).takeIf { it.isNotEmpty() } ?: return@forEach
                 val file = File(path)
-                if (file.exists() && validateGguf(file)) {
-                    val entry = restoreOrGenerateEntry(file)
-                    loadSlot(slot, entry) // background reload
-                }
+                if (file.exists()) loadSlot(slot, restoreOrGenerateEntry(file))
             }
         } catch (_: Exception) {}
     }
 
-    fun hasEnoughSpace(required: Long): Boolean {
-        val stat = StatFs(modelsDir.absolutePath)
-        return stat.availableBytes > required + 512 * 1024 * 1024L
-    }
-
-    private fun ensureGgufExtension(name: String): String =
-        if (name.endsWith(".gguf", ignoreCase = true)) name else "$name.gguf"
-
-    // Delete, cancel, etc. can be added easily
+    fun hasEnoughSpace(required: Long): Boolean = StatFs(modelsDir.absolutePath).availableBytes > required + 512 * 1024 * 1024L
+    private fun ensureGgufExtension(name: String): String = if (name.endsWith(".gguf", true)) name else "$name.gguf"
 }
