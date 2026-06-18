@@ -91,7 +91,7 @@ class ModelManager(private val context: Context) {
 
     private var downloadJob: Job? = null
 
-    // ── Dual-slot: EVERYDAY + CODER ───────────────────────────────────────────
+    // ── Dual-slot: EVERYDAY (conversation) + CODER (code work) ─────────────
     enum class Slot { EVERYDAY, CODER }
 
     private val _everydayState = MutableStateFlow(ModelState())
@@ -99,6 +99,9 @@ class ModelManager(private val context: Context) {
 
     private val _coderState = MutableStateFlow(ModelState())
     val coderState: StateFlow<ModelState> = _coderState
+
+    // Backwards compatibility for SelfCorrectionMachine.kt and other files
+    val state: StateFlow<ModelState> get() = everydayState
 
     private var everydayWrapper: LlmWrapper? = null
     private var coderWrapper: LlmWrapper? = null
