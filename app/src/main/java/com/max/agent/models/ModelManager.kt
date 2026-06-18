@@ -278,16 +278,36 @@ class ModelManager(private val context: Context) {
     }
 
     private suspend fun tryLoadWithFallbacks(slot: Slot, entry: ModelEntry, stateFlow: MutableStateFlow<ModelState>): Boolean {
-        val configs = listOf(Triple("npu", "dev0", 999), Triple("cpu_gpu", "gpu", 80))
-        for ((p, d, l) in configs) {
+        val activityManager = context.getSystemService(Context.ACTIVITY_SERVICE) as android.app.ActivityManager
+        val memoryInfo = android.app.ActivityManager.MemoryInfo()
+        activityManager.getMemoryInfo(memoryInfo)
+
+        val availableRamGb = (memoryInfo.totalMem / (1024 * 1024 * 1024.0)).toInt()
+        val optimalLayers = if (availableRamGb >= 12) 999 else if (availableRamGb >= 8) 60 else 32
+        val dynamicContext = if (availableRamGb >= 12) entry.contextLength else 16384
+
+        val configs = listOf(
+            Triple("qnn", "npu", optimalLayers),         // Targets Qualcomm Hexagon NPU
+            Triple("vulkan", "gpu", optimalLayers),      // Targets Snapdragon Adreno GPU
+            Triple("cpu", "cpu", 0)                      // Absolute fallback
+        )
+
+        for ((backend, device, layers) in configs) {
             try {
-                val result = LlmWrapper.builder().llmCreateInput(LlmCreateInput(entry.name, entry.path, ModelConfig(32768, l, 16384), p, d)).build()
+                val config = ModelConfig(dynamicContext, layers, dynamicContext / 2)
+                val result = LlmWrapper.builder()
+                    .llmCreateInput(LlmCreateInput(entry.name, entry.path, config, backend, device))
+                    .build()
+
                 if (result.isSuccess) {
                     if (slot == Slot.EVERYDAY) everydayWrapper = result.getOrThrow() else coderWrapper = result.getOrThrow()
                     stateFlow.value = ModelState(isLoaded = true, loadedModel = entry)
-                    saveSlotConfig(slot, entry); return true
+                    saveSlotConfig(slot, entry)
+                    return true
                 }
-            } catch (_: Exception) {}
+            } catch (e: Exception) {
+                appendErrorLog(Exception("Snapdragon Backend $backend failed: ${e.message}"))
+            }
         }
         return false
     }
