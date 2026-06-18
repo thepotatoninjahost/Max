@@ -5,6 +5,7 @@ import android.database.Cursor
 import android.net.Uri
 import android.os.Environment
 import android.provider.OpenableColumns
+import android.util.Log
 import com.nexa.sdk.LlmWrapper
 import com.nexa.sdk.bean.ChatMessage
 import com.nexa.sdk.bean.GenerationConfig
@@ -12,15 +13,16 @@ import com.nexa.sdk.bean.LlmCreateInput
 import com.nexa.sdk.bean.LlmStreamResult
 import com.nexa.sdk.bean.ModelConfig
 import com.nexa.sdk.bean.SamplerConfig
+import kotlinx.coroutines.CoroutineExceptionHandler
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
-import kotlinx.coroutines.CoroutineExceptionHandler
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.launch
+import org.json.JSONObject
 import java.io.File
 import java.net.HttpURLConnection
 import java.net.URL
@@ -63,6 +65,7 @@ class ModelManager(private val context: Context) {
             bytesTransferred > 0 -> formatBytes(bytesTransferred)
             else -> ""
         }
+
         private fun formatBytes(b: Long) = when {
             b >= 1_073_741_824L -> "%.1f GB".format(b / 1_073_741_824.0)
             b >= 1_048_576L     -> "%.0f MB".format(b / 1_048_576.0)
@@ -71,7 +74,7 @@ class ModelManager(private val context: Context) {
     }
 
     private val errorHandler = CoroutineExceptionHandler { _, t ->
-        android.util.Log.e("Max", "Unhandled: ${t.message}", t)
+        Log.e("Max", "Unhandled: ${t.message}", t)
         try {
             context.filesDir.resolve("errors.log")
                 .appendText("[${System.currentTimeMillis()}] ${t.javaClass.simpleName}: ${t.message}\n${t.stackTraceToString().take(800)}\n\n")
@@ -88,7 +91,7 @@ class ModelManager(private val context: Context) {
 
     private var downloadJob: Job? = null
 
-    // ── Dual-slot: EVERYDAY (conversation) + CODER (code work) ─────────────
+    // ── Dual-slot: EVERYDAY + CODER ───────────────────────────────────────────
     enum class Slot { EVERYDAY, CODER }
 
     private val _everydayState = MutableStateFlow(ModelState())
@@ -103,17 +106,16 @@ class ModelManager(private val context: Context) {
     private val modelsDir: File get() = File(context.filesDir, "models").also { it.mkdirs() }
 
     init {
-        scan() // Initial scan
+        scan()
     }
 
-    // ── Scan (now only private models directory - reliable) ───────────────────
-
+    // ── Scan (only private models dir - reliable) ─────────────────────────────
     fun scan() {
         val files = modelsDir.listFiles { f ->
             f.isFile && f.extension.equals("gguf", ignoreCase = true) && f.canRead()
         } ?: emptyArray()
 
-        android.util.Log.i("ModelManager", "SCAN: Found ${files.size} models in private models dir")
+        Log.i("ModelManager", "SCAN: Found ${files.size} models in private models dir")
 
         val currentEveryday = _everydayState.value.loadedModel
         val currentCoder = _coderState.value.loadedModel
@@ -140,12 +142,12 @@ class ModelManager(private val context: Context) {
         scope.launch {
             val file = File(entry.path)
             val diag = "path=${file.absolutePath}, exists=${file.exists()}, readable=${file.canRead()}, size=${file.length()}"
-            android.util.Log.i("ModelManager", "LOAD ATTEMPT $slot: $diag")
+            Log.i("ModelManager", "LOAD ATTEMPT $slot: $diag")
 
             if (!file.exists() || !file.canRead()) {
                 val err = "FILE ERROR: $diag"
                 stateFlow.value = ModelState(error = err)
-                android.util.Log.e("ModelManager", err)
+                Log.e("ModelManager", err)
                 onComplete(false)
                 return@launch
             }
@@ -173,28 +175,28 @@ class ModelManager(private val context: Context) {
                     result.onSuccess { w ->
                         wrapper = w
                         attempts.add("$label = SUCCESS")
-                        android.util.Log.i("ModelManager", "SUCCESS $slot $label")
+                        Log.i("ModelManager", "SUCCESS $slot $label")
                     }.onFailure { e ->
                         attempts.add("$label = FAIL: ${e.message}")
-                        android.util.Log.w("ModelManager", "FAIL $slot $label: ${e.message}")
+                        Log.w("ModelManager", "FAIL $slot $label: ${e.message}")
                     }
 
                     if (wrapper != null) break
                 } catch (t: Throwable) {
                     attempts.add("$label = CRASH: ${t.javaClass.simpleName}")
-                    android.util.Log.e("ModelManager", "CRASH $slot $label", t)
+                    Log.e("ModelManager", "CRASH $slot $label", t)
                 }
             }
 
             if (wrapper != null) {
                 if (slot == Slot.EVERYDAY) everydayWrapper = wrapper else coderWrapper = wrapper
                 stateFlow.value = ModelState(isLoaded = true, loadedModel = entry)
-                android.util.Log.i("ModelManager", "FINAL SUCCESS: $slot ${entry.name}")
+                Log.i("ModelManager", "FINAL SUCCESS: $slot ${entry.name}")
                 onComplete(true)
             } else {
                 val err = "LOAD FAILED $slot. Attempts: ${attempts.joinToString(" | ")}"
                 stateFlow.value = ModelState(error = err)
-                android.util.Log.e("ModelManager", err)
+                Log.e("ModelManager", err)
                 onComplete(false)
             }
         }
@@ -209,12 +211,12 @@ class ModelManager(private val context: Context) {
     fun releaseSlot(slot: Slot) {
         if (slot == Slot.EVERYDAY) {
             runCatching { everydayWrapper?.destroy() }
-                .onFailure { android.util.Log.e("ModelManager", "destroy() threw for EVERYDAY slot", it) }
+                .onFailure { Log.e("ModelManager", "destroy() threw for EVERYDAY slot", it) }
             everydayWrapper = null
             _everydayState.value = ModelState()
         } else {
             runCatching { coderWrapper?.destroy() }
-                .onFailure { android.util.Log.e("ModelManager", "destroy() threw for CODER slot", it) }
+                .onFailure { Log.e("ModelManager", "destroy() threw for CODER slot", it) }
             coderWrapper = null
             _coderState.value = ModelState()
         }
@@ -248,7 +250,7 @@ class ModelManager(private val context: Context) {
 
     fun saveSlotConfig(everydayPath: String?, coderPath: String?) {
         slotConfigFile.parentFile?.mkdirs()
-        slotConfigFile.writeText(org.json.JSONObject().apply {
+        slotConfigFile.writeText(JSONObject().apply {
             everydayPath?.let { put("everyday", it) }
             coderPath?.let { put("coder", it) }
         }.toString())
@@ -256,7 +258,7 @@ class ModelManager(private val context: Context) {
 
     fun getSlotEntry(slot: Slot): ModelEntry? {
         val config = runCatching {
-            org.json.JSONObject(slotConfigFile.readText())
+            JSONObject(slotConfigFile.readText())
         }.getOrNull() ?: return null
         val key = if (slot == Slot.EVERYDAY) "everyday" else "coder"
         val path = config.optString(key).ifBlank { return null }
@@ -279,13 +281,11 @@ class ModelManager(private val context: Context) {
     fun loadSlotConfig(): Pair<String?, String?> {
         if (!slotConfigFile.exists()) return Pair(null, null)
         return try {
-            val obj = org.json.JSONObject(slotConfigFile.readText())
+            val obj = JSONObject(slotConfigFile.readText())
             Pair(obj.optString("everyday").takeIf { it.isNotBlank() },
                  obj.optString("coder").takeIf { it.isNotBlank() })
         } catch (e: Exception) { Pair(null, null) }
     }
-
-    // ── Load / Release ────────────────────────────────────────────────────────
 
     fun loadModel(entry: ModelEntry, onComplete: (Boolean) -> Unit = {}) =
         loadSlot(Slot.EVERYDAY, entry, onComplete)
@@ -299,16 +299,13 @@ class ModelManager(private val context: Context) {
         }
     }
 
-    // ── Delete ────────────────────────────────────────────────────────────────
-
     fun deleteModel(entry: ModelEntry) {
         if (_everydayState.value.loadedModel?.path == entry.path) releaseCurrent()
         File(entry.path).delete()
         scan()
     }
 
-    // ── SAF Import (the reliable way) ────────────────────────────────────────
-
+    // ── SAF Import ────────────────────────────────────────────────────────────
     fun importFromUri(uri: Uri, onComplete: (Boolean) -> Unit = {}) {
         if (_transfer.value.active) return
         scope.launch {
@@ -343,8 +340,7 @@ class ModelManager(private val context: Context) {
         }
     }
 
-    // ── Download (optional but kept) ─────────────────────────────────────────
-
+    // ── Download ──────────────────────────────────────────────────────────────
     fun downloadModel(url: String, fileName: String, onComplete: (Boolean) -> Unit = {}) {
         if (_transfer.value.active) return
         val safeName = ensureGgufExtension(fileName.ifBlank { url.substringAfterLast('/') })
@@ -402,7 +398,6 @@ class ModelManager(private val context: Context) {
     }
 
     // ── Inference ─────────────────────────────────────────────────────────────
-
     suspend fun applyChatTemplate(messages: List<ChatMessage>): String? =
         applyChatTemplateForSlot(Slot.EVERYDAY, messages)
 
@@ -411,8 +406,7 @@ class ModelManager(private val context: Context) {
 
     suspend fun stopStream() { stopSlotStream(Slot.EVERYDAY) }
 
-    // ── Helpers ─────────────────────────────────────────────────────────────────
-
+    // ── Helpers ───────────────────────────────────────────────────────────────
     private fun resolveUriMeta(uri: Uri): Pair<String, Long> {
         val cursor: Cursor? = context.contentResolver.query(uri, null, null, null, null)
         return cursor?.use { c ->
