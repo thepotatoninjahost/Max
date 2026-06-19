@@ -7,23 +7,21 @@ import android.provider.OpenableColumns
 import android.system.Os
 import android.system.OsConstants
 import android.util.Log
-import androidx.room.*
 import com.nexa.sdk.LlmWrapper
 import com.nexa.sdk.bean.*
 import kotlinx.coroutines.*
 import kotlinx.coroutines.flow.*
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
+import org.json.JSONArray
 import org.json.JSONObject
 import java.io.*
 import java.util.UUID
-import kotlin.coroutines.resume
 
 enum class Slot { EVERYDAY, CODER }
 
-@Entity(tableName = "models")
 data class ModelEntry(
-    @PrimaryKey val id: String,
+    val id: String,
     val name: String,
     val path: String,
     val sizeBytes: Long,
@@ -32,31 +30,24 @@ data class ModelEntry(
     val contextLength: Int = 32768,
     val paramSize: String? = null
 ) {
-    val displaySize: String 
+    val displaySize: String
         get() = if (sizeBytes >= 1073741824) String.format("%.2f GB", sizeBytes / 1073741824.0) else String.format("%.2f MB", sizeBytes / 1048576.0)
-}
-
-@Dao
-interface ModelDao {
-    @Query("SELECT * FROM models ORDER BY name ASC")
-    suspend fun getAll(): List<ModelEntry>
-    @Insert(onConflict = OnConflictStrategy.REPLACE)
-    suspend fun insert(model: ModelEntry)
-    @Delete
-    suspend fun delete(model: ModelEntry)
-    @Query("SELECT * FROM models WHERE path = :path LIMIT 1")
-    suspend fun getByPath(path: String): ModelEntry?
-}
-
-@Database(entities = [ModelEntry::class], version = 1, exportSchema = false)
-abstract class ModelDatabase : RoomDatabase() {
-    abstract fun modelDao(): ModelDao
 }
 
 data class ModelState(
     val isLoading: Boolean = false,
     val isLoaded: Boolean = false,
     val loadedModel: ModelEntry? = null,
+    val error: String? = null
+)
+
+data class TransferState(
+    val active: Boolean = false,
+    val label: String = "",
+    val fileName: String = "",
+    val bytesTransferred: Long = 0L,
+    val totalBytes: Long = 0L,
+    val progress: Float = 0f,
     val error: String? = null
 )
 
@@ -75,25 +66,25 @@ class ModelManager(private val context: Context) {
 
     private val modelsDir: File = File(context.filesDir, "models").also { it.mkdirs() }
     private val slotConfigFile = File(context.filesDir, "config/model_slots.json").also { it.parentFile?.mkdirs() }
-    
-    private val db = Room.databaseBuilder(context.applicationContext, ModelDatabase::class.java, "models.db").build()
-    private val modelDao = db.modelDao()
+    private val dbFile = File(context.filesDir, "models_db.json")
 
     private val _available = MutableStateFlow<List<ModelEntry>>(emptyList())
     val available: StateFlow<List<ModelEntry>> = _available.asStateFlow()
 
     private val _everydayState = MutableStateFlow(ModelState())
     val everydayState: StateFlow<ModelState> = _everydayState.asStateFlow()
+    val state: StateFlow<ModelState> get() = _everydayState
 
     private val _coderState = MutableStateFlow(ModelState())
     val coderState: StateFlow<ModelState> = _coderState.asStateFlow()
 
+    private val _transfer = MutableStateFlow(TransferState())
+    val transfer: StateFlow<TransferState> = _transfer.asStateFlow()
+
     init {
-        scope.launch {
-            performScan()
-            loadSavedSlots()
-            preWarmAllModels()
-        }
+        loadSavedSlots()
+        scan()
+        preWarmAllModels()
     }
 
     fun onCleared() {
@@ -101,48 +92,41 @@ class ModelManager(private val context: Context) {
         runBlocking { releaseAllSlotsSafely() }
     }
 
-    // --- Public API ---
+    // --- Core API & Legacy Bridges ---
+
     fun isSlotLoaded(slot: Slot): Boolean = (if (slot == Slot.EVERYDAY) everydayWrapper else coderWrapper) != null
+    
     fun getSlotEntry(slot: Slot): ModelEntry? = (if (slot == Slot.EVERYDAY) everydayState.value else coderState.value).loadedModel
+    fun getEverydayEntry(): ModelEntry? = everydayState.value.loadedModel
+    fun getCoderEntry(): ModelEntry? = coderState.value.loadedModel
+    
     fun getModelByPath(path: String): ModelEntry? = available.value.find { it.path == path }
 
-    fun deleteModel(entry: ModelEntry) {
-        scope.launch {
-            File(entry.path).delete()
-            modelDao.delete(entry)
-            performScan()
-        }
-    }
+    fun cancelTransfer() { _transfer.value = TransferState() }
+    fun clearTransferError() { _transfer.value = _transfer.value.copy(error = null) }
 
-    fun applyChatTemplateForSlot(slot: Slot, prompt: String): String = 
+    fun applyChatTemplateForSlot(slot: Slot, prompt: String): String =
         (if (slot == Slot.EVERYDAY) everydayWrapper else coderWrapper)?.applyChatTemplate(prompt) ?: prompt
 
-    fun generateStreamFlowForSlot(slot: Slot, prompt: String): Flow<String> = 
+    fun applyChatTemplate(prompt: String): String = applyChatTemplateForSlot(Slot.EVERYDAY, prompt)
+
+    fun generateStreamFlowForSlot(slot: Slot, prompt: String): Flow<String> =
         (if (slot == Slot.EVERYDAY) everydayWrapper else coderWrapper)?.generateStreamFlow(prompt) ?: flowOf("Error: Model not loaded")
 
-    fun stopSlotStream(slot: Slot) { (if (slot == Slot.EVERYDAY) everydayWrapper else coderWrapper)?.stopStream() }
+    fun generateStreamFlow(prompt: String): Flow<String> = generateStreamFlowForSlot(Slot.EVERYDAY, prompt)
 
-    // --- Legacy UI / API Bridge (Fixes MaxApp.kt & CI Crashes) ---
-    fun scan() { scope.launch { performScan() } }
+    fun stopSlotStream(slot: Slot) { (if (slot == Slot.EVERYDAY) everydayWrapper else coderWrapper)?.stopStream() }
     
-    fun clearTransferError() { /* No-op: Transfers removed for offline mode */ }
-    
-    fun getCoderEntry(): ModelEntry? = getSlotEntry(Slot.CODER)
-    
-    fun getEverydayEntry(): ModelEntry? = getSlotEntry(Slot.EVERYDAY)
+    fun stopStream() {
+        everydayWrapper?.stopStream()
+        coderWrapper?.stopStream()
+    }
 
     suspend fun loadSlotAsync(slot: Slot, entry: ModelEntry): Boolean = suspendCancellableCoroutine { cont ->
-        loadSlot(slot, entry) { success ->
-            if (cont.isActive) cont.resume(success)
-        }
+        loadSlot(slot, entry) { success -> if (cont.isActive) cont.resume(success, null) }
     }
 
-    fun stopStream() {
-        stopSlotStream(Slot.EVERYDAY)
-        stopSlotStream(Slot.CODER)
-    }
-
-    fun loadSlotConfig() { scope.launch { loadSavedSlots() } }
+    fun loadSlotConfig() { loadSavedSlots() }
 
     fun saveSlotConfig(slot: Slot, entry: ModelEntry) { writeSlotConfig(slot, entry.path) }
 
@@ -156,9 +140,161 @@ class ModelManager(private val context: Context) {
         writeSlotConfig(mappedSlot, mappedPath)
     }
 
-    // --- Architecture Upgrades ---
+    // --- Offline Native Database ---
+
+    private fun getAllFromDb(): List<ModelEntry> {
+        if (!dbFile.exists()) return emptyList()
+        val list = mutableListOf<ModelEntry>()
+        try {
+            val array = JSONArray(dbFile.readText())
+            for (i in 0 until array.length()) {
+                val obj = array.getJSONObject(i)
+                list.add(ModelEntry(
+                    id = obj.getString("id"), name = obj.getString("name"), path = obj.getString("path"),
+                    sizeBytes = obj.getLong("sizeBytes"), addedAt = obj.getLong("addedAt"),
+                    sha256 = obj.optString("sha256", null), contextLength = obj.optInt("contextLength", 32768),
+                    paramSize = obj.optString("paramSize", null)
+                ))
+            }
+        } catch (_: Exception) {}
+        return list
+    }
+
+    private fun saveToDb(entry: ModelEntry) {
+        val current = getAllFromDb().toMutableList()
+        current.removeAll { it.path == entry.path }
+        current.add(entry)
+        writeDb(current)
+    }
+
+    private fun writeDb(list: List<ModelEntry>) {
+        try {
+            val array = JSONArray()
+            list.forEach {
+                val obj = JSONObject().apply {
+                    put("id", it.id); put("name", it.name); put("path", it.path)
+                    put("sizeBytes", it.sizeBytes); put("addedAt", it.addedAt)
+                    put("sha256", it.sha256); put("contextLength", it.contextLength)
+                    put("paramSize", it.paramSize)
+                }
+                array.put(obj)
+            }
+            dbFile.writeText(array.toString())
+        } catch (_: Exception) {}
+    }
+
+    // --- Hardware & IO Logic ---
+
+    fun scan() {
+        val files = modelsDir.listFiles { f -> f.isFile && f.extension.equals("gguf", ignoreCase = true) && f.canRead() } ?: emptyArray()
+        val currentDb = getAllFromDb()
+        
+        _available.value = files.mapNotNull { f ->
+            if (!validateGguf(f)) { f.delete(); null } 
+            else {
+                var entry = currentDb.find { it.path == f.absolutePath }
+                if (entry == null) {
+                    entry = ModelEntry(UUID.randomUUID().toString(), f.nameWithoutExtension, f.absolutePath, f.length(), f.lastModified())
+                    saveToDb(entry)
+                }
+                entry
+            }
+        }.sortedBy { it.name.lowercase() }
+    }
+
+    fun deleteModel(entry: ModelEntry) {
+        scope.launch {
+            File(entry.path).delete()
+            val current = getAllFromDb().toMutableList()
+            current.removeAll { it.id == entry.id }
+            writeDb(current)
+            scan()
+        }
+    }
+
+    fun importFromUri(uri: Uri, onComplete: (Boolean) -> Unit = {}) {
+        scope.launch {
+            var dest: File? = null
+            try {
+                val cursor = context.contentResolver.query(uri, arrayOf(OpenableColumns.DISPLAY_NAME), null, null, null)
+                val name = cursor?.use { if (it.moveToFirst()) it.getString(0) else "imported.gguf" } ?: "imported.gguf"
+                dest = File(modelsDir, ensureGgufExtension(name))
+                if (dest.exists()) throw Exception("Already exists")
+                context.contentResolver.openInputStream(uri)?.use { input -> FileOutputStream(dest).use { output -> input.copyTo(output) } }
+                if (!validateGguf(dest)) throw Exception("Invalid")
+                scan()
+                onComplete(true)
+            } catch (e: Exception) { 
+                dest?.delete()
+                onComplete(false) 
+            }
+        }
+    }
+
+    fun loadSlot(slot: Slot, entry: ModelEntry, onComplete: (Boolean) -> Unit = {}) {
+        scope.launch {
+            slotMutex.withLock {
+                releaseSlotInternal(if (slot == Slot.EVERYDAY) Slot.CODER else Slot.EVERYDAY)
+                releaseSlotInternal(slot)
+                
+                val stateFlow = if (slot == Slot.EVERYDAY) _everydayState else _coderState
+                stateFlow.value = ModelState(isLoading = true, loadedModel = entry)
+                
+                val success = tryHardwareAcceleratedLoad(slot, entry, stateFlow)
+                if (!success) stateFlow.value = ModelState(error = "Hardware allocation failed")
+                onComplete(success)
+            }
+        }
+    }
+
+    private suspend fun tryHardwareAcceleratedLoad(slot: Slot, entry: ModelEntry, stateFlow: MutableStateFlow<ModelState>): Boolean {
+        val (backend, device, layers) = benchmarkAndGetHardwareProfile(entry)
+        val ramGb = ((context.getSystemService(Context.ACTIVITY_SERVICE) as android.app.ActivityManager)
+            .apply { getMemoryInfo(android.app.ActivityManager.MemoryInfo()) }
+            .let { android.app.ActivityManager.MemoryInfo().totalMem } / 1073741824.0).toInt()
+        val dynamicContext = if (ramGb >= 12) entry.contextLength else 16384
+
+        try {
+            val config = ModelConfig(dynamicContext, layers, dynamicContext / 2)
+            val result = LlmWrapper.builder()
+                .llmCreateInput(LlmCreateInput(entry.name, entry.path, config, backend, device))
+                .build()
+            
+            if (result.isSuccess) {
+                if (slot == Slot.EVERYDAY) everydayWrapper = result.getOrThrow() else coderWrapper = result.getOrThrow()
+                stateFlow.value = ModelState(isLoaded = true, loadedModel = entry)
+                writeSlotConfig(slot, entry.path)
+                return true
+            }
+        } catch (e: Exception) { appendErrorLog(Exception("Load failed: ${e.message}")) }
+        return false
+    }
+
+    fun releaseSlot(slot: Slot) { scope.launch { slotMutex.withLock { releaseSlotInternal(slot) } } }
+
+    private suspend fun releaseSlotInternal(slot: Slot) {
+        if (slot == Slot.EVERYDAY) {
+            everydayWrapper?.stopStream()
+            everydayWrapper?.close()
+            everydayWrapper = null
+            _everydayState.value = ModelState()
+        } else {
+            coderWrapper?.stopStream()
+            coderWrapper?.close()
+            coderWrapper = null
+            _coderState.value = ModelState()
+        }
+    }
+
+    private suspend fun releaseAllSlotsSafely() {
+        slotMutex.withLock {
+            releaseSlotInternal(Slot.EVERYDAY)
+            releaseSlotInternal(Slot.CODER)
+        }
+    }
+
     private fun preWarmAllModels() {
-        scope.launch { modelDao.getAll().forEach { preWarmModel(it.path) } }
+        scope.launch { getAllFromDb().forEach { preWarmModel(it.path) } }
     }
 
     private fun preWarmModel(path: String) {
@@ -202,7 +338,6 @@ class ModelManager(private val context: Context) {
         return Triple("cpu", "cpu", 0)
     }
 
-    // --- Core Logic ---
     private fun appendErrorLog(t: Throwable) {
         try { context.filesDir.resolve("errors.log").appendText("${System.currentTimeMillis()}: ${t.message}\n") } catch (_: Exception) {}
     }
@@ -217,102 +352,6 @@ class ModelManager(private val context: Context) {
         return try { FileInputStream(file).use { it.readInt() == 0x47475546 } } catch (e: Exception) { false }
     }
 
-    private suspend fun performScan() = withContext(Dispatchers.IO) {
-        val files = modelsDir.listFiles { f -> f.isFile && f.extension.equals("gguf", ignoreCase = true) && f.canRead() } ?: emptyArray()
-        
-        val validEntries = files.mapNotNull { f ->
-            if (!validateGguf(f)) { f.delete(); null } 
-            else {
-                var entry = modelDao.getByPath(f.absolutePath)
-                if (entry == null) {
-                    entry = ModelEntry(UUID.randomUUID().toString(), f.nameWithoutExtension, f.absolutePath, f.length(), f.lastModified())
-                    modelDao.insert(entry)
-                }
-                entry
-            }
-        }.sortedBy { it.name.lowercase() }
-
-        modelDao.getAll().forEach { dbEntry ->
-            if (validEntries.none { it.id == dbEntry.id }) modelDao.delete(dbEntry)
-        }
-        _available.value = validEntries
-    }
-
-    fun importFromUri(uri: Uri, onComplete: (Boolean) -> Unit = {}) {
-        scope.launch {
-            var dest: File? = null
-            try {
-                val cursor = context.contentResolver.query(uri, arrayOf(OpenableColumns.DISPLAY_NAME), null, null, null)
-                val name = cursor?.use { if (it.moveToFirst()) it.getString(0) else "imported.gguf" } ?: "imported.gguf"
-                dest = File(modelsDir, ensureGgufExtension(name))
-                if (dest.exists()) throw Exception("Already exists")
-                context.contentResolver.openInputStream(uri)?.use { input -> FileOutputStream(dest).use { output -> input.copyTo(output) } }
-                if (!validateGguf(dest)) throw Exception("Invalid")
-                performScan(); onComplete(true)
-            } catch (e: Exception) { dest?.delete(); onComplete(false) }
-        }
-    }
-
-    fun loadSlot(slot: Slot, entry: ModelEntry, onComplete: (Boolean) -> Unit = {}) {
-        scope.launch {
-            slotMutex.withLock {
-                releaseSlotInternal(if (slot == Slot.EVERYDAY) Slot.CODER else Slot.EVERYDAY)
-                releaseSlotInternal(slot)
-                
-                val stateFlow = if (slot == Slot.EVERYDAY) _everydayState else _coderState
-                stateFlow.value = ModelState(isLoading = true, loadedModel = entry)
-                
-                val success = tryHardwareAcceleratedLoad(slot, entry, stateFlow)
-                if (!success) stateFlow.value = ModelState(error = "Hardware allocation failed")
-                onComplete(success)
-            }
-        }
-    }
-
-    private suspend fun tryHardwareAcceleratedLoad(slot: Slot, entry: ModelEntry, stateFlow: MutableStateFlow<ModelState>): Boolean {
-        val (backend, device, layers) = benchmarkAndGetHardwareProfile(entry)
-        val ramGb = ((context.getSystemService(Context.ACTIVITY_SERVICE) as android.app.ActivityManager)
-            .apply { getMemoryInfo(android.app.ActivityManager.MemoryInfo()) }
-            .let { android.app.ActivityManager.MemoryInfo().totalMem } / 1073741824.0).toInt()
-        val dynamicContext = if (ramGb >= 12) entry.contextLength else 16384
-
-        try {
-            val config = ModelConfig(dynamicContext, layers, dynamicContext / 2)
-            val result = LlmWrapper.builder().llmCreateInput(LlmCreateInput(entry.name, entry.path, config, backend, device)).build()
-            
-            if (result.isSuccess) {
-                if (slot == Slot.EVERYDAY) everydayWrapper = result.getOrThrow() else coderWrapper = result.getOrThrow()
-                stateFlow.value = ModelState(isLoaded = true, loadedModel = entry)
-                writeSlotConfig(slot, entry.path)
-                return true
-            }
-        } catch (e: Exception) { appendErrorLog(Exception("Load failed: ${e.message}")) }
-        return false
-    }
-
-    fun releaseSlot(slot: Slot) { scope.launch { slotMutex.withLock { releaseSlotInternal(slot) } } }
-
-    private suspend fun releaseSlotInternal(slot: Slot) {
-        if (slot == Slot.EVERYDAY) {
-            everydayWrapper?.stopStream()
-            everydayWrapper?.close()
-            everydayWrapper = null
-            _everydayState.value = ModelState()
-        } else {
-            coderWrapper?.stopStream()
-            coderWrapper?.close()
-            coderWrapper = null
-            _coderState.value = ModelState()
-        }
-    }
-
-    private suspend fun releaseAllSlotsSafely() {
-        slotMutex.withLock {
-            releaseSlotInternal(Slot.EVERYDAY)
-            releaseSlotInternal(Slot.CODER)
-        }
-    }
-
     private fun writeSlotConfig(slot: Slot, path: String) {
         try {
             val json = if (slotConfigFile.exists()) JSONObject(slotConfigFile.readText()) else JSONObject()
@@ -321,13 +360,14 @@ class ModelManager(private val context: Context) {
         } catch (_: Exception) {}
     }
 
-    private suspend fun loadSavedSlots() {
+    private fun loadSavedSlots() {
         if (!slotConfigFile.exists()) return
         try {
             val json = JSONObject(slotConfigFile.readText())
             listOf(Slot.EVERYDAY to "everyday", Slot.CODER to "coder").forEach { (slot, key) ->
                 val path = json.optString(key).takeIf { it.isNotEmpty() } ?: return@forEach
-                modelDao.getByPath(path)?.let { loadSlot(slot, it) }
+                val entry = getAllFromDb().find { it.path == path }
+                if (entry != null) loadSlot(slot, entry)
             }
         } catch (_: Exception) {}
     }
