@@ -32,7 +32,7 @@ data class ModelEntry(
     val paramSize: String? = null
 ) {
     val displaySize: String
-        get() = if (sizeBytes >= 1_073_741_824) {
+        get() = if (sizeBytes >= 1_073_741_824L) {
             String.format("%.2f GB", sizeBytes / 1_073_741_824.0)
         } else {
             String.format("%.2f MB", sizeBytes / 1_048_576.0)
@@ -174,6 +174,7 @@ class ModelManager(private val context: Context) {
                 )
             }
         } catch (e: Exception) {
+            Log.e("ModelManager", "DB read failed", e)
             emptyList()
         }
     }
@@ -260,9 +261,7 @@ class ModelManager(private val context: Context) {
                 if (dest.exists()) throw IOException("File already exists")
 
                 context.contentResolver.openInputStream(uri)?.use { input ->
-                    FileOutputStream(dest).use { output ->
-                        input.copyTo(output)
-                    }
+                    FileOutputStream(dest).use { output -> input.copyTo(output) }
                 }
 
                 if (!validateGguf(dest)) throw IOException("Invalid GGUF file")
@@ -275,7 +274,7 @@ class ModelManager(private val context: Context) {
         }
     }
 
-    // ====================== Model Loading ======================
+    // ====================== Model Loading (Fixed for Real SDK) ======================
 
     fun loadSlot(slot: Slot, entry: ModelEntry, onComplete: (Boolean) -> Unit = {}) {
         scope.launch {
@@ -300,31 +299,42 @@ class ModelManager(private val context: Context) {
         entry: ModelEntry,
         stateFlow: MutableStateFlow<ModelState>
     ): Boolean {
-        val (backend, device, layers) = benchmarkAndGetHardwareProfile(entry)
+        val (pluginId, deviceId, layers) = benchmarkAndGetHardwareProfile(entry)
         val dynamicContext = if (getTotalRamGb() >= 12) entry.contextLength else 16384
 
         try {
-            val config = ModelConfig(dynamicContext, layers, dynamicContext / 2)
-            val input = LlmCreateInput(entry.name, entry.path, config, backend, device)
+            val config = ModelConfig(
+                nCtx = dynamicContext,
+                nGpuLayers = layers
+            )
 
-            val result = LlmWrapper.builder()
+            val input = LlmCreateInput(
+                modelName = "",           // empty for GGUF
+                modelPath = entry.path,
+                config = config,
+                pluginId = pluginId,
+                deviceId = deviceId
+            )
+
+            var loaded = false
+            LlmWrapper.builder()
                 .llmCreateInput(input)
                 .build()
+                .onSuccess { wrapper ->
+                    if (slot == Slot.EVERYDAY) everydayWrapper = wrapper else coderWrapper = wrapper
+                    stateFlow.value = ModelState(isLoaded = true, loadedModel = entry)
+                    writeSlotConfig(slot, entry.path)
+                    loaded = true
+                }
+                .onFailure { e ->
+                    appendErrorLog(e)
+                }
 
-            if (result.isSuccess) {
-                val wrapper = result.getOrThrow()
-                if (slot == Slot.EVERYDAY) everydayWrapper = wrapper else coderWrapper = wrapper
-
-                stateFlow.value = ModelState(isLoaded = true, loadedModel = entry)
-                writeSlotConfig(slot, entry.path)
-                return true
-            } else {
-                appendErrorLog(Exception("LLM creation failed: ${result.exceptionOrNull()?.message}"))
-            }
+            return loaded
         } catch (e: Exception) {
             appendErrorLog(e)
+            return false
         }
-        return false
     }
 
     fun releaseSlot(slot: Slot) {
@@ -354,19 +364,19 @@ class ModelManager(private val context: Context) {
         }
     }
 
-    // ====================== Hardware & Utils ======================
+    // ====================== Hardware Benchmark ======================
 
     private fun getTotalRamGb(): Int {
         val memInfo = android.app.ActivityManager.MemoryInfo()
         (context.getSystemService(Context.ACTIVITY_SERVICE) as android.app.ActivityManager)
             .getMemoryInfo(memInfo)
-        return (memInfo.totalMem / 1_073_741_824.0).toInt()
+        return (memInfo.totalMem / 1_073_741_824L).toInt()
     }
 
-    private suspend fun benchmarkAndGetHardwareProfile(entry: ModelEntry): Triple<String, String, Int> {
+    private suspend fun benchmarkAndGetHardwareProfile(entry: ModelEntry): Triple<String, String?, Int> {
         val prefs = context.getSharedPreferences("nexa_hardware_profile", Context.MODE_PRIVATE)
-        val cachedBackend = prefs.getString("backend", null)
-        val cachedDevice = prefs.getString("device", null)
+        val cachedPlugin = prefs.getString("pluginId", null)
+        val cachedDevice = prefs.getString("deviceId", null)
 
         val ramGb = getTotalRamGb()
         val optimalLayers = when {
@@ -375,40 +385,50 @@ class ModelManager(private val context: Context) {
             else -> 32
         }
 
-        if (cachedBackend != null && cachedDevice != null) {
-            return Triple(cachedBackend, cachedDevice, optimalLayers)
+        if (cachedPlugin != null) {
+            return Triple(cachedPlugin, cachedDevice, optimalLayers)
         }
 
-        val testConfigs = listOf(
-            Triple("qnn", "npu", optimalLayers),
-            Triple("vulkan", "gpu", optimalLayers),
-            Triple("cpu", "cpu", 0)
+        val testProfiles = listOf(
+            Triple("npu", null, optimalLayers),      // Qualcomm NPU
+            Triple("cpu_gpu", "gpu", optimalLayers),
+            Triple("cpu_gpu", null, 0)               // pure CPU fallback
         )
 
-        for ((backend, device, layers) in testConfigs) {
+        for ((pluginId, deviceId, layers) in testProfiles) {
             try {
-                val testConfig = ModelConfig(128, layers, 64)
-                val testInput = LlmCreateInput(entry.name, entry.path, testConfig, backend, device)
+                val testConfig = ModelConfig(nCtx = 128, nGpuLayers = layers)
+                val testInput = LlmCreateInput(
+                    modelName = "",
+                    modelPath = entry.path,
+                    config = testConfig,
+                    pluginId = pluginId,
+                    deviceId = deviceId
+                )
 
-                val result = LlmWrapper.builder()
+                var success = false
+                LlmWrapper.builder()
                     .llmCreateInput(testInput)
                     .build()
-
-                if (result.isSuccess) {
-                    result.getOrThrow().apply {
-                        stopStream()
-                        close()
+                    .onSuccess { wrapper ->
+                        wrapper.stopStream()
+                        wrapper.close()
+                        success = true
                     }
+
+                if (success) {
                     prefs.edit()
-                        .putString("backend", backend)
-                        .putString("device", device)
+                        .putString("pluginId", pluginId)
+                        .putString("deviceId", deviceId)
                         .apply()
-                    return Triple(backend, device, layers)
+                    return Triple(pluginId, deviceId, layers)
                 }
             } catch (_: Exception) {}
         }
-        return Triple("cpu", "cpu", 0)
+        return Triple("cpu_gpu", null, 0)
     }
+
+    // ====================== Utils ======================
 
     private fun preWarmAllModels() {
         scope.launch {
@@ -420,7 +440,6 @@ class ModelManager(private val context: Context) {
         try {
             val file = File(path)
             if (!file.exists() || file.length() == 0L) return
-
             RandomAccessFile(file, "r").use { raf ->
                 val size = raf.length()
                 val addr = Os.mmap(0L, size, OsConstants.PROT_READ, OsConstants.MAP_SHARED, raf.fd, 0L)
@@ -450,7 +469,7 @@ class ModelManager(private val context: Context) {
     private fun validateGguf(file: File): Boolean {
         if (!file.exists() || file.length() < 4) return false
         return try {
-            FileInputStream(file).use { it.readInt() == 0x47475546 } // GGUF magic
+            FileInputStream(file).use { it.readInt() == 0x47475546 }
         } catch (e: Exception) {
             false
         }
