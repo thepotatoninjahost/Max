@@ -31,7 +31,10 @@ data class ModelEntry(
     val sha256: String? = null,
     val contextLength: Int = 32768,
     val paramSize: String? = null
-)
+) {
+    val displaySize: String 
+        get() = if (sizeBytes >= 1073741824) String.format("%.2f GB", sizeBytes / 1073741824.0) else String.format("%.2f MB", sizeBytes / 1048576.0)
+}
 
 @Dao
 interface ModelDao {
@@ -87,7 +90,7 @@ class ModelManager(private val context: Context) {
 
     init {
         scope.launch {
-            scan()
+            performScan()
             loadSavedSlots()
             preWarmAllModels()
         }
@@ -107,7 +110,7 @@ class ModelManager(private val context: Context) {
         scope.launch {
             File(entry.path).delete()
             modelDao.delete(entry)
-            scan()
+            performScan()
         }
     }
 
@@ -119,7 +122,15 @@ class ModelManager(private val context: Context) {
 
     fun stopSlotStream(slot: Slot) { (if (slot == Slot.EVERYDAY) everydayWrapper else coderWrapper)?.stopStream() }
 
-    // --- Legacy API Bridge (Fixes CI Crashes) ---
+    // --- Legacy UI / API Bridge (Fixes MaxApp.kt & CI Crashes) ---
+    fun scan() { scope.launch { performScan() } }
+    
+    fun clearTransferError() { /* No-op: Transfers removed for offline mode */ }
+    
+    fun getCoderEntry(): ModelEntry? = getSlotEntry(Slot.CODER)
+    
+    fun getEverydayEntry(): ModelEntry? = getSlotEntry(Slot.EVERYDAY)
+
     suspend fun loadSlotAsync(slot: Slot, entry: ModelEntry): Boolean = suspendCancellableCoroutine { cont ->
         loadSlot(slot, entry) { success ->
             if (cont.isActive) cont.resume(success)
@@ -131,8 +142,18 @@ class ModelManager(private val context: Context) {
         stopSlotStream(Slot.CODER)
     }
 
-    fun loadSlotConfig() {
-        scope.launch { loadSavedSlots() }
+    fun loadSlotConfig() { scope.launch { loadSavedSlots() } }
+
+    fun saveSlotConfig(slot: Slot, entry: ModelEntry) { writeSlotConfig(slot, entry.path) }
+
+    fun saveSlotConfig(slotName: String, entryData: Any?) {
+        val mappedSlot = if (slotName.equals("coder", true)) Slot.CODER else Slot.EVERYDAY
+        val mappedPath = when (entryData) {
+            is ModelEntry -> entryData.path
+            is String -> entryData
+            else -> return
+        }
+        writeSlotConfig(mappedSlot, mappedPath)
     }
 
     // --- Architecture Upgrades ---
@@ -196,7 +217,7 @@ class ModelManager(private val context: Context) {
         return try { FileInputStream(file).use { it.readInt() == 0x47475546 } } catch (e: Exception) { false }
     }
 
-    suspend fun scan() = withContext(Dispatchers.IO) {
+    private suspend fun performScan() = withContext(Dispatchers.IO) {
         val files = modelsDir.listFiles { f -> f.isFile && f.extension.equals("gguf", ignoreCase = true) && f.canRead() } ?: emptyArray()
         
         val validEntries = files.mapNotNull { f ->
@@ -227,7 +248,7 @@ class ModelManager(private val context: Context) {
                 if (dest.exists()) throw Exception("Already exists")
                 context.contentResolver.openInputStream(uri)?.use { input -> FileOutputStream(dest).use { output -> input.copyTo(output) } }
                 if (!validateGguf(dest)) throw Exception("Invalid")
-                scan(); onComplete(true)
+                performScan(); onComplete(true)
             } catch (e: Exception) { dest?.delete(); onComplete(false) }
         }
     }
@@ -262,7 +283,7 @@ class ModelManager(private val context: Context) {
             if (result.isSuccess) {
                 if (slot == Slot.EVERYDAY) everydayWrapper = result.getOrThrow() else coderWrapper = result.getOrThrow()
                 stateFlow.value = ModelState(isLoaded = true, loadedModel = entry)
-                saveSlotConfig(slot, entry)
+                writeSlotConfig(slot, entry.path)
                 return true
             }
         } catch (e: Exception) { appendErrorLog(Exception("Load failed: ${e.message}")) }
@@ -292,10 +313,10 @@ class ModelManager(private val context: Context) {
         }
     }
 
-    private fun saveSlotConfig(slot: Slot, entry: ModelEntry) {
+    private fun writeSlotConfig(slot: Slot, path: String) {
         try {
             val json = if (slotConfigFile.exists()) JSONObject(slotConfigFile.readText()) else JSONObject()
-            json.put(if (slot == Slot.EVERYDAY) "everyday" else "coder", entry.path)
+            json.put(if (slot == Slot.EVERYDAY) "everyday" else "coder", path)
             slotConfigFile.writeText(json.toString())
         } catch (_: Exception) {}
     }
