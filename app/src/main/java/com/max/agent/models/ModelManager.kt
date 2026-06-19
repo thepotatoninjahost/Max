@@ -17,6 +17,7 @@ import org.json.JSONArray
 import org.json.JSONObject
 import java.io.*
 import java.util.UUID
+import kotlin.random.Random
 
 enum class Slot { EVERYDAY, CODER }
 
@@ -95,11 +96,11 @@ class ModelManager(private val context: Context) {
     // --- Core API & Legacy Bridges ---
 
     fun isSlotLoaded(slot: Slot): Boolean = (if (slot == Slot.EVERYDAY) everydayWrapper else coderWrapper) != null
-    
+
     fun getSlotEntry(slot: Slot): ModelEntry? = (if (slot == Slot.EVERYDAY) everydayState.value else coderState.value).loadedModel
     fun getEverydayEntry(): ModelEntry? = everydayState.value.loadedModel
     fun getCoderEntry(): ModelEntry? = coderState.value.loadedModel
-    
+
     fun getModelByPath(path: String): ModelEntry? = available.value.find { it.path == path }
 
     fun cancelTransfer() { _transfer.value = TransferState() }
@@ -116,14 +117,14 @@ class ModelManager(private val context: Context) {
     fun generateStreamFlow(prompt: String): Flow<String> = generateStreamFlowForSlot(Slot.EVERYDAY, prompt)
 
     fun stopSlotStream(slot: Slot) { (if (slot == Slot.EVERYDAY) everydayWrapper else coderWrapper)?.stopStream() }
-    
+
     fun stopStream() {
         everydayWrapper?.stopStream()
         coderWrapper?.stopStream()
     }
 
     suspend fun loadSlotAsync(slot: Slot, entry: ModelEntry): Boolean = suspendCancellableCoroutine { cont ->
-        loadSlot(slot, entry) { success -> if (cont.isActive) cont.resume(success, null) }
+        loadSlot(slot, entry) { success -> if (cont.isActive) cont.resume(success) }
     }
 
     fun loadSlotConfig() { loadSavedSlots() }
@@ -152,8 +153,9 @@ class ModelManager(private val context: Context) {
                 list.add(ModelEntry(
                     id = obj.getString("id"), name = obj.getString("name"), path = obj.getString("path"),
                     sizeBytes = obj.getLong("sizeBytes"), addedAt = obj.getLong("addedAt"),
-                    sha256 = obj.optString("sha256", null), contextLength = obj.optInt("contextLength", 32768),
-                    paramSize = obj.optString("paramSize", null)
+                    sha256 = obj.optString("sha256").takeIf { it.isNotEmpty() },
+                    contextLength = obj.optInt("contextLength", 32768),
+                    paramSize = obj.optString("paramSize").takeIf { it.isNotEmpty() }
                 ))
             }
         } catch (_: Exception) {}
@@ -172,14 +174,18 @@ class ModelManager(private val context: Context) {
             val array = JSONArray()
             list.forEach {
                 val obj = JSONObject().apply {
-                    put("id", it.id); put("name", it.name); put("path", it.path)
-                    put("sizeBytes", it.sizeBytes); put("addedAt", it.addedAt)
-                    put("sha256", it.sha256); put("contextLength", it.contextLength)
+                    put("id", it.id)
+                    put("name", it.name)
+                    put("path", it.path)
+                    put("sizeBytes", it.sizeBytes)
+                    put("addedAt", it.addedAt)
+                    put("sha256", it.sha256)
+                    put("contextLength", it.contextLength)
                     put("paramSize", it.paramSize)
                 }
                 array.put(obj)
             }
-            dbFile.writeText(array.toString())
+            dbFile.writeText(array.toString(2))
         } catch (_: Exception) {}
     }
 
@@ -188,13 +194,21 @@ class ModelManager(private val context: Context) {
     fun scan() {
         val files = modelsDir.listFiles { f -> f.isFile && f.extension.equals("gguf", ignoreCase = true) && f.canRead() } ?: emptyArray()
         val currentDb = getAllFromDb()
-        
+
         _available.value = files.mapNotNull { f ->
-            if (!validateGguf(f)) { f.delete(); null } 
-            else {
+            if (!validateGguf(f)) {
+                f.delete()
+                null
+            } else {
                 var entry = currentDb.find { it.path == f.absolutePath }
                 if (entry == null) {
-                    entry = ModelEntry(UUID.randomUUID().toString(), f.nameWithoutExtension, f.absolutePath, f.length(), f.lastModified())
+                    entry = ModelEntry(
+                        id = UUID.randomUUID().toString(),
+                        name = f.nameWithoutExtension,
+                        path = f.absolutePath,
+                        sizeBytes = f.length(),
+                        addedAt = f.lastModified()
+                    )
                     saveToDb(entry)
                 }
                 entry
@@ -219,14 +233,18 @@ class ModelManager(private val context: Context) {
                 val cursor = context.contentResolver.query(uri, arrayOf(OpenableColumns.DISPLAY_NAME), null, null, null)
                 val name = cursor?.use { if (it.moveToFirst()) it.getString(0) else "imported.gguf" } ?: "imported.gguf"
                 dest = File(modelsDir, ensureGgufExtension(name))
-                if (dest.exists()) throw Exception("Already exists")
-                context.contentResolver.openInputStream(uri)?.use { input -> FileOutputStream(dest).use { output -> input.copyTo(output) } }
-                if (!validateGguf(dest)) throw Exception("Invalid")
+                if (dest.exists()) throw Exception("File already exists")
+                context.contentResolver.openInputStream(uri)?.use { input ->
+                    FileOutputStream(dest).use { output ->
+                        input.copyTo(output)
+                    }
+                }
+                if (!validateGguf(dest)) throw Exception("Invalid GGUF file")
                 scan()
                 onComplete(true)
-            } catch (e: Exception) { 
+            } catch (e: Exception) {
                 dest?.delete()
-                onComplete(false) 
+                onComplete(false)
             }
         }
     }
@@ -234,43 +252,61 @@ class ModelManager(private val context: Context) {
     fun loadSlot(slot: Slot, entry: ModelEntry, onComplete: (Boolean) -> Unit = {}) {
         scope.launch {
             slotMutex.withLock {
+                // Release the opposite slot to manage memory
                 releaseSlotInternal(if (slot == Slot.EVERYDAY) Slot.CODER else Slot.EVERYDAY)
                 releaseSlotInternal(slot)
-                
+
                 val stateFlow = if (slot == Slot.EVERYDAY) _everydayState else _coderState
                 stateFlow.value = ModelState(isLoading = true, loadedModel = entry)
-                
+
                 val success = tryHardwareAcceleratedLoad(slot, entry, stateFlow)
-                if (!success) stateFlow.value = ModelState(error = "Hardware allocation failed")
+                if (!success) {
+                    stateFlow.value = ModelState(error = "Failed to load model. Check logs.")
+                }
                 onComplete(success)
             }
         }
     }
 
-    private suspend fun tryHardwareAcceleratedLoad(slot: Slot, entry: ModelEntry, stateFlow: MutableStateFlow<ModelState>): Boolean {
+    private suspend fun tryHardwareAcceleratedLoad(
+        slot: Slot,
+        entry: ModelEntry,
+        stateFlow: MutableStateFlow<ModelState>
+    ): Boolean {
         val (backend, device, layers) = benchmarkAndGetHardwareProfile(entry)
-        val ramGb = ((context.getSystemService(Context.ACTIVITY_SERVICE) as android.app.ActivityManager)
-            .apply { getMemoryInfo(android.app.ActivityManager.MemoryInfo()) }
-            .let { android.app.ActivityManager.MemoryInfo().totalMem } / 1073741824.0).toInt()
+        val ramGb = getTotalRamGb()
+
         val dynamicContext = if (ramGb >= 12) entry.contextLength else 16384
 
         try {
             val config = ModelConfig(dynamicContext, layers, dynamicContext / 2)
+            val createInput = LlmCreateInput(entry.name, entry.path, config, backend, device)
             val result = LlmWrapper.builder()
-                .llmCreateInput(LlmCreateInput(entry.name, entry.path, config, backend, device))
+                .llmCreateInput(createInput)
                 .build()
-            
+
             if (result.isSuccess) {
-                if (slot == Slot.EVERYDAY) everydayWrapper = result.getOrThrow() else coderWrapper = result.getOrThrow()
+                val wrapper = result.getOrThrow()
+                if (slot == Slot.EVERYDAY) everydayWrapper = wrapper else coderWrapper = wrapper
                 stateFlow.value = ModelState(isLoaded = true, loadedModel = entry)
                 writeSlotConfig(slot, entry.path)
                 return true
+            } else {
+                appendErrorLog(Exception("LLM load failed: ${result.exceptionOrNull()?.message}"))
             }
-        } catch (e: Exception) { appendErrorLog(Exception("Load failed: ${e.message}")) }
+        } catch (e: Exception) {
+            appendErrorLog(e)
+        }
         return false
     }
 
-    fun releaseSlot(slot: Slot) { scope.launch { slotMutex.withLock { releaseSlotInternal(slot) } } }
+    fun releaseSlot(slot: Slot) {
+        scope.launch {
+            slotMutex.withLock {
+                releaseSlotInternal(slot)
+            }
+        }
+    }
 
     private suspend fun releaseSlotInternal(slot: Slot) {
         if (slot == Slot.EVERYDAY) {
@@ -294,43 +330,65 @@ class ModelManager(private val context: Context) {
     }
 
     private fun preWarmAllModels() {
-        scope.launch { getAllFromDb().forEach { preWarmModel(it.path) } }
+        scope.launch {
+            getAllFromDb().forEach { preWarmModel(it.path) }
+        }
     }
 
     private fun preWarmModel(path: String) {
         try {
             val file = File(path)
-            if (!file.exists()) return
+            if (!file.exists() || file.length() == 0L) return
             RandomAccessFile(file, "r").use { raf ->
                 val size = raf.length()
-                if (size > 0) {
-                    val address = Os.mmap(0L, size, OsConstants.PROT_READ, OsConstants.MAP_SHARED, raf.fd, 0L)
-                    Os.munmap(address, size)
-                }
+                val address = Os.mmap(0L, size, OsConstants.PROT_READ, OsConstants.MAP_SHARED, raf.fd, 0L)
+                Os.munmap(address, size)
             }
         } catch (_: Exception) {}
     }
 
-    private suspend fun benchmarkAndGetHardwareProfile(entry: ModelEntry): Triple<String, String, Int> {
-        val prefs = context.getSharedPreferences("nexa_hardware_profile", Context.MODE_PRIVATE)
-        val bestBackend = prefs.getString("backend", null)
-        val bestDevice = prefs.getString("device", null)
-        
+    private fun getTotalRamGb(): Int {
         val memInfo = android.app.ActivityManager.MemoryInfo()
         (context.getSystemService(Context.ACTIVITY_SERVICE) as android.app.ActivityManager).getMemoryInfo(memInfo)
-        val ramGb = (memInfo.totalMem / 1073741824.0).toInt()
+        return (memInfo.totalMem / 1073741824.0).toInt()
+    }
+
+    private suspend fun benchmarkAndGetHardwareProfile(entry: ModelEntry): Triple<String, String, Int> {
+        val prefs = context.getSharedPreferences("nexa_hardware_profile", Context.MODE_PRIVATE)
+        val cachedBackend = prefs.getString("backend", null)
+        val cachedDevice = prefs.getString("device", null)
+
+        if (cachedBackend != null && cachedDevice != null) {
+            val optimalLayers = if (getTotalRamGb() >= 12) 999 else if (getTotalRamGb() >= 8) 60 else 32
+            return Triple(cachedBackend, cachedDevice, optimalLayers)
+        }
+
+        val ramGb = getTotalRamGb()
         val optimalLayers = if (ramGb >= 12) 999 else if (ramGb >= 8) 60 else 32
 
-        if (bestBackend != null && bestDevice != null) return Triple(bestBackend, bestDevice, optimalLayers)
+        val configs = listOf(
+            Triple("qnn", "npu", optimalLayers),
+            Triple("vulkan", "gpu", optimalLayers),
+            Triple("cpu", "cpu", 0)
+        )
 
-        val configs = listOf(Triple("qnn", "npu", optimalLayers), Triple("vulkan", "gpu", optimalLayers), Triple("cpu", "cpu", 0))
         for ((backend, device, layers) in configs) {
             try {
                 val testConfig = ModelConfig(128, layers, 64)
-                val result = LlmWrapper.builder().llmCreateInput(LlmCreateInput(entry.name, entry.path, testConfig, backend, device)).build()
+                val testInput = LlmCreateInput(entry.name, entry.path, testConfig, backend, device)
+                val result = LlmWrapper.builder()
+                    .llmCreateInput(testInput)
+                    .build()
+
                 if (result.isSuccess) {
-                    result.getOrThrow().apply { stopStream(); close() }
-                    prefs.edit().putString("backend", backend).putString("device", device).apply()
+                    result.getOrThrow().apply {
+                        stopStream()
+                        close()
+                    }
+                    prefs.edit()
+                        .putString("backend", backend)
+                        .putString("device", device)
+                        .apply()
                     return Triple(backend, device, layers)
                 }
             } catch (_: Exception) {}
@@ -339,24 +397,36 @@ class ModelManager(private val context: Context) {
     }
 
     private fun appendErrorLog(t: Throwable) {
-        try { context.filesDir.resolve("errors.log").appendText("${System.currentTimeMillis()}: ${t.message}\n") } catch (_: Exception) {}
+        try {
+            val logFile = context.filesDir.resolve("errors.log")
+            logFile.parentFile?.mkdirs()
+            logFile.appendText("${System.currentTimeMillis()}: ${t.message} | ${t.stackTraceToString().take(500)}\n")
+        } catch (_: Exception) {}
     }
 
     private fun InputStream.readInt(): Int {
         val b = ByteArray(4)
-        return if (read(b) == 4) ((b[0].toInt() and 0xFF) shl 24) or ((b[1].toInt() and 0xFF) shl 16) or ((b[2].toInt() and 0xFF) shl 8) or (b[3].toInt() and 0xFF) else -1
+        return if (read(b) == 4) {
+            ((b[0].toInt() and 0xFF) shl 24) or
+            ((b[1].toInt() and 0xFF) shl 16) or
+            ((b[2].toInt() and 0xFF) shl 8) or
+            (b[3].toInt() and 0xFF)
+        } else -1
     }
 
     private fun validateGguf(file: File): Boolean {
         if (!file.exists() || file.length() < 4) return false
-        return try { FileInputStream(file).use { it.readInt() == 0x47475546 } } catch (e: Exception) { false }
+        return try {
+            FileInputStream(file).use { it.readInt() == 0x47475546 } // 'GGUF' magic
+        } catch (e: Exception) { false }
     }
 
     private fun writeSlotConfig(slot: Slot, path: String) {
         try {
             val json = if (slotConfigFile.exists()) JSONObject(slotConfigFile.readText()) else JSONObject()
             json.put(if (slot == Slot.EVERYDAY) "everyday" else "coder", path)
-            slotConfigFile.writeText(json.toString())
+            slotConfigFile.parentFile?.mkdirs()
+            slotConfigFile.writeText(json.toString(2))
         } catch (_: Exception) {}
     }
 
@@ -366,12 +436,20 @@ class ModelManager(private val context: Context) {
             val json = JSONObject(slotConfigFile.readText())
             listOf(Slot.EVERYDAY to "everyday", Slot.CODER to "coder").forEach { (slot, key) ->
                 val path = json.optString(key).takeIf { it.isNotEmpty() } ?: return@forEach
-                val entry = getAllFromDb().find { it.path == path }
-                if (entry != null) loadSlot(slot, entry)
+                val entry = getAllFromDb().find { it.path == path } ?: return@forEach
+                loadSlot(slot, entry)
             }
         } catch (_: Exception) {}
     }
 
-    fun hasEnoughSpace(required: Long): Boolean = StatFs(modelsDir.absolutePath).availableBytes > required + 512 * 1024 * 1024L
-    private fun ensureGgufExtension(name: String): String = if (name.endsWith(".gguf", true)) name else "$name.gguf"
+    fun hasEnoughSpace(required: Long): Boolean {
+        return try {
+            StatFs(modelsDir.absolutePath).availableBytes > required + 512 * 1024 * 1024L
+        } catch (_: Exception) {
+            true // fallback
+        }
+    }
+
+    private fun ensureGgufExtension(name: String): String =
+        if (name.endsWith(".gguf", ignoreCase = true)) name else "$name.gguf"
 }
