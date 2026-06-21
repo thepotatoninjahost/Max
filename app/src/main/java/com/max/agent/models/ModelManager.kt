@@ -194,7 +194,7 @@ class ModelManager(private val context: Context) {
     suspend fun loadSlotAsync(slot: Slot, entry: ModelEntry): Boolean =
         suspendCancellableCoroutine { cont ->
             loadSlot(slot, entry) { success ->
-                if (cont.isActive) cont.resume(success)
+                if (cont.isActive) cont.resumeWith(Result.success(success))
             }
         }
 
