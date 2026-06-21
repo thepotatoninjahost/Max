@@ -106,3 +106,43 @@ callbacks (`RecognitionService.onCancel/onStopListening`,
 from scratch. **Zero stubs or placeholders remain** — every feature is
 implemented and wired end-to-end from UI to engine. Local debug APK builds and
 assembles clean. CI pipeline configured for GitHub Actions.
+
+## 5. Third Pass — Nexa SDK 0.0.24 Migration Completion (2026-06-21)
+
+CI had been red for 5 consecutive `main` pushes (2026-06-19), all clustered on
+`ModelManager.kt` refactor commits. Root cause: a **half-completed Nexa SDK
+0.0.24 API migration**. The consumers (`AgentLoop`, `PatchGenerator`) had been
+updated to the new SDK shape, but `ModelManager`'s wrapper methods were left on
+the old shape — and the model data types were top-level while every consumer
+referenced them as `ModelManager.<Type>`. Because `ModelManager.kt` itself
+failed to compile, none of its symbols entered the symbol table, cascading 14
+errors across 4 files.
+
+All signatures were verified against the **actual Nexa `core-0.0.24.aar`
+bytecode** (`javap`) before any edit — no inference.
+
+| # | Severity | Module | Defect | Fix |
+|---|----------|--------|--------|-----|
+| 25 | 🔴 CRITICAL | `models/ModelManager.kt` | `Slot`, `ModelEntry`, `ModelState`, `TransferState` were top-level in `com.max.agent.models`, but every consumer referenced them as `ModelManager.Slot`/`ModelManager.ModelEntry`/`ModelManager.TransferState` → 6 "Unresolved reference" errors across `AgentLoop`, `MaxSystem`, `MaxApp`. | Nested all four inside `class ModelManager`. Zero consumer edits needed for qualification; internal unqualified refs resolve via inner scope. |
+| 26 | 🔴 CRITICAL | `models/ModelManager.kt` | `applyChatTemplateForSlot`/`applyChatTemplate` took `String` and returned `String` (old SDK). Consumers pass `List<ChatMessage>` and expect `String?`. Real SDK 0.0.24: `suspend fun applyChatTemplate(Array<ChatMessage>, String tools, Boolean enableThinking, Boolean verbose): Result<LlmApplyChatTemplateOutput>` (`.formattedText`). | Rewrote both as `suspend fun ...(slot, messages: List<ChatMessage>): String?`. Calls `wrapper.applyChatTemplate(messages.toTypedArray(), "", false, false)` **positionally** (avoids param-name drift), `.getOrThrow().formattedText`, with `runCatching` + error log. |
+| 27 | 🔴 CRITICAL | `models/ModelManager.kt` | `generateStreamFlowForSlot`/`generateStreamFlow` returned `Flow<String>` (old). Consumers expect `Flow<LlmStreamResult>` and call with `maxTokens`. Real SDK: `generateStreamFlow(String, GenerationConfig): Flow<LlmStreamResult>`. | Rewrote both to return `Flow<LlmStreamResult>` with `maxTokens: Int = 4096` param, building `GenerationConfig().apply { this.maxTokens = maxTokens }`. No-wrapper fallback emits `LlmStreamResult.Error`. |
+| 28 | 🟠 HIGH | `models/ModelManager.kt` | SDK `stopStream()` is `suspend`. ModelManager's `stopSlotStream`/`stopStream` called it directly while declared non-suspend → "Suspend function should be called only from a coroutine." But `MaxSystem` calls `runCatching { modelManager.stopStream() }` inside `scope.launch` — `runCatching`'s lambda is non-suspend, so these methods **cannot** be suspend. | Kept `stopSlotStream`/`stopStream` non-suspend; each launches an internal `scope.launch { runCatching { wrapper.stopStream() } }`. Satisfies both the non-suspend `runCatching` call site and suspend `collect`-lambda call sites. |
+| 29 | 🟠 HIGH | `models/ModelManager.kt` | `LlmCreateInput` constructed with camelCase params (`modelName=`, `modelPath=`, `pluginId=`, `deviceId=`) — real 0.0.24 properties are snake_case (`model_name`, `model_path`, `tokenizer_path`, `plugin_id`, `device_id`); `tokenizer_path` is a new required-ish param. | Switched to snake_case named args; added `tokenizer_path = ""`; `device_id = deviceId ?: ""` (deviceId is `String?` from the hardware profile Triple). |
+| 30 | 🟠 HIGH | `models/ModelManager.kt` | `benchmarkAndGetHardwareProfile` invoked the suspend `wrapper.stopStream()`/`close()` inside `.onSuccess { }` — a non-suspend lambda → compile error. | Restructured: `.build().getOrNull()` first (suspend `build()` stays in the suspend function), then `runCatching { wrapper.stopStream() }; runCatching { wrapper.close() }` in suspend scope. |
+| 31 | 🟠 HIGH | `core/MaxSystem.kt:382` | `val (everydayPath, _) = modelManager.loadSlotConfig()` — `loadSlotConfig()` returned `Unit` (it aliased the auto-loading `loadSavedSlots()`). Destructuring `Unit` → "Destructuring declaration initializer of type Unit". | Split: `loadSlotConfig(): Pair<String?, String?>` is now read-only (returns saved everyday/coder paths, no side effects); `loadSavedSlots()` (private) keeps the startup auto-load for `init`. |
+| 32 | 🟠 HIGH | `core/MaxSystem.kt:441` | `modelManager.releaseCurrent()` — no such method existed. | Added `fun releaseCurrent()` that fires `scope.launch { releaseAllSlotsSafely() }` (async release of both slots) for `MaxSystem.shutdown()`. |
+| 33 | 🟡 MEDIUM | `ui/MaxApp.kt:461` | `transfer.progressText` — `TransferState` had no `progressText` member. | Added computed `val progressText: String` to `TransferState` (error → percent → label/filename fallback). |
+| 34 | 🟡 MEDIUM | `ui/MaxApp.kt:493` | `saveSlotConfig(getEverydayEntry()?.path, entry.path)` — first arg `String?` but overload declared `slotName: String` (non-null). | Widened `saveSlotConfig(slotName: String?, entryData: Any?)` to accept nullable slotName; no-ops on null. |
+
+### Verification (Third Pass)
+
+Signatures confirmed against `ai.nexa:core:0.0.24` AAR bytecode (`javap`):
+`applyChatTemplate([LChatMessage;,String,Z,Z,Continuation)→Result<LlmApplyChatTemplateOutput>`,
+`generateStreamFlow(String,GenerationConfig)→Flow<LlmStreamResult>`,
+`stopStream` suspend, `LlmCreateInput(model_name,model_path,tokenizer_path,config,plugin_id,device_id)`,
+`GenerationConfig()` no-arg ctor + settable `maxTokens`, `LlmStreamResult.{Token,Error,Completed}`,
+`LlmApplyChatTemplateOutput.formattedText`. Both consumers (`AgentLoop.run`,
+`PatchGenerator.generate`) confirmed `suspend fun` and already calling new-style
+API. Static checks: brace/paren/bracket balance OK; no stale top-level types; all
+new symbols present; 10 consumer `ModelManager.<Type>` refs resolve to nested
+types. CI validation via PR.

@@ -8,7 +8,11 @@ import android.system.Os
 import android.system.OsConstants
 import android.util.Log
 import com.nexa.sdk.LlmWrapper
+import com.nexa.sdk.bean.ChatMessage
+import com.nexa.sdk.bean.GenerationConfig
+import com.nexa.sdk.bean.LlmApplyChatTemplateOutput
 import com.nexa.sdk.bean.LlmCreateInput
+import com.nexa.sdk.bean.LlmStreamResult
 import com.nexa.sdk.bean.ModelConfig
 import kotlinx.coroutines.*
 import kotlinx.coroutines.flow.*
@@ -19,44 +23,52 @@ import org.json.JSONObject
 import java.io.*
 import java.util.UUID
 
-enum class Slot { EVERYDAY, CODER }
-
-data class ModelEntry(
-    val id: String,
-    val name: String,
-    val path: String,
-    val sizeBytes: Long,
-    val addedAt: Long,
-    val sha256: String? = null,
-    val contextLength: Int = 32768,
-    val paramSize: String? = null
-) {
-    val displaySize: String
-        get() = if (sizeBytes >= 1_073_741_824L) {
-            String.format("%.2f GB", sizeBytes / 1_073_741_824.0)
-        } else {
-            String.format("%.2f MB", sizeBytes / 1_048_576.0)
-        }
-}
-
-data class ModelState(
-    val isLoading: Boolean = false,
-    val isLoaded: Boolean = false,
-    val loadedModel: ModelEntry? = null,
-    val error: String? = null
-)
-
-data class TransferState(
-    val active: Boolean = false,
-    val label: String = "",
-    val fileName: String = "",
-    val bytesTransferred: Long = 0L,
-    val totalBytes: Long = 0L,
-    val progress: Float = 0f,
-    val error: String? = null
-)
-
 class ModelManager(private val context: Context) {
+
+    enum class Slot { EVERYDAY, CODER }
+
+    data class ModelEntry(
+        val id: String,
+        val name: String,
+        val path: String,
+        val sizeBytes: Long,
+        val addedAt: Long,
+        val sha256: String? = null,
+        val contextLength: Int = 32768,
+        val paramSize: String? = null
+    ) {
+        val displaySize: String
+            get() = if (sizeBytes >= 1_073_741_824L) {
+                String.format("%.2f GB", sizeBytes / 1_073_741_824.0)
+            } else {
+                String.format("%.2f MB", sizeBytes / 1_048_576.0)
+            }
+    }
+
+    data class ModelState(
+        val isLoading: Boolean = false,
+        val isLoaded: Boolean = false,
+        val loadedModel: ModelEntry? = null,
+        val error: String? = null
+    )
+
+    data class TransferState(
+        val active: Boolean = false,
+        val label: String = "",
+        val fileName: String = "",
+        val bytesTransferred: Long = 0L,
+        val totalBytes: Long = 0L,
+        val progress: Float = 0f,
+        val error: String? = null
+    ) {
+        val progressText: String
+            get() = when {
+                error != null -> "error: $error"
+                !active -> label.ifEmpty { fileName.ifEmpty { "idle" } }
+                totalBytes > 0L -> "%.0f%% — %s".format(progress * 100f, fileName)
+                else -> label.ifEmpty { fileName }
+            }
+    }
 
     private val errorHandler = CoroutineExceptionHandler { _, t ->
         Log.e("ModelManager", "Unhandled exception", t)
@@ -113,38 +125,103 @@ class ModelManager(private val context: Context) {
     fun cancelTransfer() { _transfer.value = TransferState() }
     fun clearTransferError() { _transfer.value = _transfer.value.copy(error = null) }
 
-    fun applyChatTemplateForSlot(slot: Slot, prompt: String): String =
-        (if (slot == Slot.EVERYDAY) everydayWrapper else coderWrapper)?.applyChatTemplate(prompt) ?: prompt
+    /**
+     * Applies the model's chat template to a list of ChatMessages and returns the
+     * formatted prompt string, or null if the slot has no loaded model or templating fails.
+     *
+     * Nexa SDK 0.0.24 signature:
+     *   suspend fun applyChatTemplate(
+     *       messages: Array<ChatMessage>,
+     *       tools: String,
+     *       enableThinking: Boolean,
+     *       verbose: Boolean
+     *   ): Result<LlmApplyChatTemplateOutput>
+     * Called positionally to avoid any parameter-name drift.
+     */
+    suspend fun applyChatTemplateForSlot(slot: Slot, messages: List<ChatMessage>): String? {
+        val wrapper = (if (slot == Slot.EVERYDAY) everydayWrapper else coderWrapper) ?: return null
+        return runCatching {
+            wrapper.applyChatTemplate(messages.toTypedArray(), "", false, false)
+                .getOrThrow().formattedText
+        }.onFailure { appendErrorLog(it) }.getOrNull()
+    }
 
-    fun applyChatTemplate(prompt: String): String = applyChatTemplateForSlot(Slot.EVERYDAY, prompt)
+    suspend fun applyChatTemplate(messages: List<ChatMessage>): String? =
+        applyChatTemplateForSlot(Slot.EVERYDAY, messages)
 
-    fun generateStreamFlowForSlot(slot: Slot, prompt: String): Flow<String> =
-        (if (slot == Slot.EVERYDAY) everydayWrapper else coderWrapper)?.generateStreamFlow(prompt)
-            ?: flowOf("Error: Model not loaded")
+    /**
+     * Streams generation for a slot. Returns Flow<LlmStreamResult> (Token/Error/Completed).
+     * Nexa SDK 0.0.24: generateStreamFlow(prompt: String, config: GenerationConfig): Flow<LlmStreamResult>
+     */
+    fun generateStreamFlowForSlot(slot: Slot, prompt: String, maxTokens: Int = 4096): Flow<LlmStreamResult> {
+        val wrapper = (if (slot == Slot.EVERYDAY) everydayWrapper else coderWrapper)
+            ?: return flowOf(LlmStreamResult.Error(IllegalStateException("Error: Model not loaded")))
+        val config = GenerationConfig().apply { this.maxTokens = maxTokens }
+        return try {
+            wrapper.generateStreamFlow(prompt, config)
+        } catch (e: Exception) {
+            appendErrorLog(e)
+            flowOf(LlmStreamResult.Error(e))
+        }
+    }
 
-    fun generateStreamFlow(prompt: String): Flow<String> = generateStreamFlowForSlot(Slot.EVERYDAY, prompt)
+    fun generateStreamFlow(prompt: String, maxTokens: Int = 4096): Flow<LlmStreamResult> =
+        generateStreamFlowForSlot(Slot.EVERYDAY, prompt, maxTokens)
 
+    /**
+     * Non-suspend: launches an internal coroutine to invoke the suspend wrapper.stopStream().
+     * Kept non-suspend so callers inside non-suspend lambdas (e.g. runCatching { }) still compile.
+     */
     fun stopSlotStream(slot: Slot) {
-        (if (slot == Slot.EVERYDAY) everydayWrapper else coderWrapper)?.stopStream()
+        val wrapper = (if (slot == Slot.EVERYDAY) everydayWrapper else coderWrapper) ?: return
+        scope.launch { runCatching { wrapper.stopStream() } }
     }
 
     fun stopStream() {
-        everydayWrapper?.stopStream()
-        coderWrapper?.stopStream()
+        scope.launch {
+            runCatching { everydayWrapper?.stopStream() }
+            runCatching { coderWrapper?.stopStream() }
+        }
+    }
+
+    /**
+     * Releases both slots asynchronously (fire-and-forget). Used by MaxSystem.shutdown().
+     */
+    fun releaseCurrent() {
+        scope.launch { releaseAllSlotsSafely() }
     }
 
     suspend fun loadSlotAsync(slot: Slot, entry: ModelEntry): Boolean =
         suspendCancellableCoroutine { cont ->
             loadSlot(slot, entry) { success ->
-                if (cont.isActive) cont.resume(success)
+                if (cont.isActive) cont.resumeWith(Result.success(success))
             }
         }
 
-    fun loadSlotConfig() = loadSavedSlots()
+    /**
+     * Read-only access to the persisted slot config. Returns (everydayPath, coderPath).
+     * Does NOT auto-load; callers (MaxSystem) load explicitly.
+     */
+    fun loadSlotConfig(): Pair<String?, String?> {
+        if (!slotConfigFile.exists()) return null to null
+        return try {
+            val json = JSONObject(slotConfigFile.readText())
+            json.optString("everyday").takeIf { it.isNotEmpty() } to
+                json.optString("coder").takeIf { it.isNotEmpty() }
+        } catch (e: Exception) {
+            Log.e("ModelManager", "Failed to read slot config", e)
+            null to null
+        }
+    }
 
     fun saveSlotConfig(slot: Slot, entry: ModelEntry) = writeSlotConfig(slot, entry.path)
 
-    fun saveSlotConfig(slotName: String, entryData: Any?) {
+    /**
+     * Persist a slot assignment by symbolic name. Accepts a nullable slotName and a nullable
+     * entry payload (ModelEntry or raw path String); no-ops on null/unrecognized input.
+     */
+    fun saveSlotConfig(slotName: String?, entryData: Any?) {
+        if (slotName == null) return
         val mappedSlot = if (slotName.equals("coder", ignoreCase = true)) Slot.CODER else Slot.EVERYDAY
         val mappedPath = when (entryData) {
             is ModelEntry -> entryData.path
@@ -274,7 +351,7 @@ class ModelManager(private val context: Context) {
         }
     }
 
-    // ====================== Model Loading (Fixed for Real SDK) ======================
+    // ====================== Model Loading (Nexa SDK 0.0.24) ======================
 
     fun loadSlot(slot: Slot, entry: ModelEntry, onComplete: (Boolean) -> Unit = {}) {
         scope.launch {
@@ -308,12 +385,15 @@ class ModelManager(private val context: Context) {
                 nGpuLayers = layers
             )
 
+            // Nexa SDK 0.0.24 LlmCreateInput uses snake_case property names:
+            //   model_name, model_path, tokenizer_path, config, plugin_id, device_id
             val input = LlmCreateInput(
-                modelName = "",           // empty for GGUF
-                modelPath = entry.path,
+                model_name = "",
+                model_path = entry.path,
+                tokenizer_path = "",
                 config = config,
-                pluginId = pluginId,
-                deviceId = deviceId
+                plugin_id = pluginId,
+                device_id = deviceId ?: ""
             )
 
             var loaded = false
@@ -399,24 +479,24 @@ class ModelManager(private val context: Context) {
             try {
                 val testConfig = ModelConfig(nCtx = 128, nGpuLayers = layers)
                 val testInput = LlmCreateInput(
-                    modelName = "",
-                    modelPath = entry.path,
+                    model_name = "",
+                    model_path = entry.path,
+                    tokenizer_path = "",
                     config = testConfig,
-                    pluginId = pluginId,
-                    deviceId = deviceId
+                    plugin_id = pluginId,
+                    device_id = deviceId ?: ""
                 )
 
-                var success = false
-                LlmWrapper.builder()
+                // build() is suspend; call it directly in this suspend function, then
+                // invoke the suspend stopStream() outside any non-suspend lambda.
+                val wrapper = LlmWrapper.builder()
                     .llmCreateInput(testInput)
                     .build()
-                    .onSuccess { wrapper ->
-                        wrapper.stopStream()
-                        wrapper.close()
-                        success = true
-                    }
+                    .getOrNull()
 
-                if (success) {
+                if (wrapper != null) {
+                    runCatching { wrapper.stopStream() }
+                    runCatching { wrapper.close() }
                     prefs.edit()
                         .putString("pluginId", pluginId)
                         .putString("deviceId", deviceId)
