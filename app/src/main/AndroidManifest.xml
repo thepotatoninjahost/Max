@@ -33,6 +33,7 @@
     </queries>
 
     <application
+        android:name=".MaxApplication"
         android:label="Max"
         android:icon="@mipmap/ic_launcher"
         android:largeHeap="true"
