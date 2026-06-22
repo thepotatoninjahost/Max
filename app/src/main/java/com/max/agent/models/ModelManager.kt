@@ -496,76 +496,106 @@ class ModelManager(private val context: Context) {
         }
     }
 
+    /**
+     * Architecture: NPU-first, catch-and-fallback. No benchmark loading.
+     *
+     * The S25's Snapdragon NPU is the correct acceleration path for Nexa SDK.
+     * We do NOT pre-load the model to test the plugin — that double-loads into
+     * NPU memory and crashes. Instead:
+     *
+     *   1. Try NPU directly with full layer offload.
+     *   2. If it fails, try CPU/GPU.
+     *   3. If that fails, report error.
+     *
+     * The successful profile is cached so subsequent loads skip the fallback path.
+     */
     private suspend fun tryHardwareAcceleratedLoad(
         slot: Slot,
         entry: ModelEntry,
         stateFlow: MutableStateFlow<ModelState>
     ): Boolean {
-        val (pluginId, deviceId, layers) = benchmarkAndGetHardwareProfile(entry)
-        // Adaptive context: large models need smaller KV caches to avoid OOM on mobile.
-        val dynamicContext = computeAdaptiveContext(entry, getTotalRamGb())
+        val ramGb = getTotalRamGb()
+        val contextSize = computeAdaptiveContext(ramGb)
 
-        try {
-            val config = ModelConfig(
-                nCtx = dynamicContext,
-                nGpuLayers = layers
-            )
+        // ── Attempt 1: NPU (the correct path for Snapdragon S25) ──
+        val npuConfig = ModelConfig(nCtx = contextSize, nGpuLayers = 999)
+        val npuInput = LlmCreateInput(
+            model_name = "",
+            model_path = entry.path,
+            tokenizer_path = "",
+            config = npuConfig,
+            plugin_id = "npu",
+            device_id = ""
+        )
 
-            // Nexa SDK 0.0.24 LlmCreateInput uses snake_case property names:
-            //   model_name, model_path, tokenizer_path, config, plugin_id, device_id
-            val input = LlmCreateInput(
-                model_name = "",
-                model_path = entry.path,
-                tokenizer_path = "",
-                config = config,
-                plugin_id = pluginId,
-                device_id = deviceId ?: ""
-            )
-
-            var loaded = false
-            LlmWrapper.builder()
-                .llmCreateInput(input)
-                .build()
-                .onSuccess { wrapper ->
-                    if (slot == Slot.EVERYDAY) everydayWrapper = wrapper else coderWrapper = wrapper
-                    stateFlow.value = ModelState(isLoaded = true, loadedModel = entry)
-                    writeSlotConfig(slot, entry.path)
-                    loaded = true
-                }
-                .onFailure { e ->
-                    appendErrorLog(e)
-                }
-
-            // Fallback: if the preferred profile failed, retry with pure CPU.
-            if (!loaded && pluginId != "cpu_gpu") {
-                appendErrorLog(RuntimeException("Primary profile ($pluginId) failed — falling back to pure CPU."))
-                clearCachedHardwareProfile()
-                val cpuConfig = ModelConfig(nCtx = dynamicContext.coerceAtMost(4096), nGpuLayers = 0)
-                val cpuInput = LlmCreateInput(
-                    model_name = "",
-                    model_path = entry.path,
-                    tokenizer_path = "",
-                    config = cpuConfig,
-                    plugin_id = "cpu_gpu",
-                    device_id = ""
-                )
-                LlmWrapper.builder()
-                    .llmCreateInput(cpuInput)
-                    .build()
-                    .onSuccess { wrapper ->
-                        if (slot == Slot.EVERYDAY) everydayWrapper = wrapper else coderWrapper = wrapper
-                        stateFlow.value = ModelState(isLoaded = true, loadedModel = entry)
-                        writeSlotConfig(slot, entry.path)
-                        loaded = true
-                    }
-                    .onFailure { e -> appendErrorLog(e) }
+        var loaded = false
+        LlmWrapper.builder()
+            .llmCreateInput(npuInput)
+            .build()
+            .onSuccess { wrapper ->
+                if (slot == Slot.EVERYDAY) everydayWrapper = wrapper else coderWrapper = wrapper
+                stateFlow.value = ModelState(isLoaded = true, loadedModel = entry)
+                writeSlotConfig(slot, entry.path)
+                cacheHardwareProfile("npu", "")
+                loaded = true
+            }
+            .onFailure { e ->
+                appendErrorLog(e)
             }
 
-            return loaded
-        } catch (e: Exception) {
-            appendErrorLog(e)
-            return false
-        }
+        if (loaded) return true
+
+        // ── Attempt 2: CPU/GPU fallback (only if NPU genuinely failed) ──
+        appendErrorLog(RuntimeException("NPU load failed — attempting CPU/GPU fallback."))
+        val cpuConfig = ModelConfig(nCtx = contextSize, nGpuLayers = 999)
+        val cpuInput = LlmCreateInput(
+            model_name = "",
+            model_path = entry.path,
+            tokenizer_path = "",
+            config = cpuConfig,
+            plugin_id = "cpu_gpu",
+            device_id = "gpu"
+        )
+
+        LlmWrapper.builder()
+            .llmCreateInput(cpuInput)
+            .build()
+            .onSuccess { wrapper ->
+                if (slot == Slot.EVERYDAY) everydayWrapper = wrapper else coderWrapper = wrapper
+                stateFlow.value = ModelState(isLoaded = true, loadedModel = entry)
+                writeSlotConfig(slot, entry.path)
+                cacheHardwareProfile("cpu_gpu", "gpu")
+                loaded = true
+            }
+            .onFailure { e ->
+                appendErrorLog(e)
+            }
+
+        return loaded
+    }
+
+    /**
+     * Context window sizing based on available RAM — not model size.
+     * The S25 has 12GB; after OS and app overhead ~7-8GB is free.
+     * A 9B model (~5.5GB weights) + 8K KV cache (~0.5GB) fits comfortably.
+     */
+    private fun computeAdaptiveContext(ramGb: Int): Int = when {
+        ramGb >= 12 -> 8192
+        ramGb >= 8  -> 4096
+        else        -> 2048
+    }
+
+    private fun cacheHardwareProfile(pluginId: String, deviceId: String) {
+        context.getSharedPreferences("nexa_hardware_profile", Context.MODE_PRIVATE)
+            .edit()
+            .putString("pluginId", pluginId)
+            .putString("deviceId", deviceId)
+            .apply()
+    }
+
+    private fun clearCachedHardwareProfile() {
+        context.getSharedPreferences("nexa_hardware_profile", Context.MODE_PRIVATE)
+            .edit().clear().apply()
     }
 
     fun releaseSlot(slot: Slot) {
@@ -595,110 +625,13 @@ class ModelManager(private val context: Context) {
         }
     }
 
-    // ====================== Hardware Benchmark ======================
+    // ====================== Hardware Info ======================
 
     private fun getTotalRamGb(): Int {
         val memInfo = android.app.ActivityManager.MemoryInfo()
         (context.getSystemService(Context.ACTIVITY_SERVICE) as android.app.ActivityManager)
             .getMemoryInfo(memInfo)
         return (memInfo.totalMem / 1_073_741_824L).toInt()
-    }
-
-    private suspend fun benchmarkAndGetHardwareProfile(entry: ModelEntry): Triple<String, String?, Int> {
-        val prefs = context.getSharedPreferences("nexa_hardware_profile", Context.MODE_PRIVATE)
-        val cachedPlugin = prefs.getString("pluginId", null)
-        val cachedDevice = prefs.getString("deviceId", null)
-
-        val ramGb = getTotalRamGb()
-        val modelSizeGb = entry.sizeBytes / 1_073_741_824.0
-
-        // GPU layer budget: scale down for large models to avoid GPU OOM.
-        val optimalLayers = when {
-            modelSizeGb >= 6.0 -> 0       // pure CPU — too large for GPU offload on mobile
-            modelSizeGb >= 4.0 -> 20      // partial offload only
-            ramGb >= 12 -> 999            // small model, lots of RAM — offload everything
-            ramGb >= 8 -> 60
-            else -> 32
-        }
-
-        if (cachedPlugin != null) {
-            return Triple(cachedPlugin, cachedDevice, optimalLayers)
-        }
-
-        // Size-aware benchmark: skip risky profiles for large models.
-        // NPU can crash natively (SIGSEGV) if the plugin is incompatible —
-        // that bypasses all Java try/catch. Don't risk it on big models.
-        val testProfiles = when {
-            modelSizeGb >= 5.0 -> listOf(
-                Triple("cpu_gpu", null, 0)               // straight to CPU, no benchmark
-            )
-            modelSizeGb >= 3.0 -> listOf(
-                Triple("cpu_gpu", "gpu", optimalLayers),  // GPU only, skip NPU
-                Triple("cpu_gpu", null, 0)                // CPU fallback
-            )
-            else -> listOf(
-                Triple("npu", null, optimalLayers),       // small model — NPU is safe to try
-                Triple("cpu_gpu", "gpu", optimalLayers),
-                Triple("cpu_gpu", null, 0)                // pure CPU fallback
-            )
-        }
-
-        for ((pluginId, deviceId, layers) in testProfiles) {
-            try {
-                val testConfig = ModelConfig(nCtx = 128, nGpuLayers = layers)
-                val testInput = LlmCreateInput(
-                    model_name = "",
-                    model_path = entry.path,
-                    tokenizer_path = "",
-                    config = testConfig,
-                    plugin_id = pluginId,
-                    device_id = deviceId ?: ""
-                )
-
-                // build() is suspend; call it directly in this suspend function, then
-                // invoke the suspend stopStream() outside any non-suspend lambda.
-                val wrapper = LlmWrapper.builder()
-                    .llmCreateInput(testInput)
-                    .build()
-                    .getOrNull()
-
-                if (wrapper != null) {
-                    runCatching { wrapper.stopStream() }
-                    runCatching { wrapper.close() }
-                    prefs.edit()
-                        .putString("pluginId", pluginId)
-                        .putString("deviceId", deviceId)
-                        .apply()
-                    return Triple(pluginId, deviceId, layers)
-                }
-            } catch (_: Exception) {}
-        }
-        return Triple("cpu_gpu", null, 0)
-    }
-
-    /**
-     * Computes an adaptive context window size based on model size and available RAM.
-     * Large models on mobile need smaller KV caches to avoid OOM.
-     */
-    private fun computeAdaptiveContext(entry: ModelEntry, ramGb: Int): Int {
-        val modelSizeGb = entry.sizeBytes / 1_073_741_824.0
-        // KV cache grows with context × model dimensions. Be conservative on mobile.
-        return when {
-            modelSizeGb >= 7.0 -> 2048       // very large model — minimal context
-            modelSizeGb >= 5.0 -> 4096       // large model — small context
-            modelSizeGb >= 3.0 -> 8192       // medium model
-            ramGb >= 12 -> entry.contextLength.coerceAtMost(16384)  // small model, lots of RAM
-            else -> entry.contextLength.coerceAtMost(8192)
-        }
-    }
-
-    /**
-     * Clears the cached hardware profile so the next load re-benchmarks.
-     * Called when a profile fails to load — prevents a bad cache from poisoning every future load.
-     */
-    private fun clearCachedHardwareProfile() {
-        context.getSharedPreferences("nexa_hardware_profile", Context.MODE_PRIVATE)
-            .edit().clear().apply()
     }
 
     // ====================== Utils ======================
