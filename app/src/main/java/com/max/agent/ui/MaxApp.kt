@@ -40,6 +40,7 @@ import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import androidx.compose.ui.text.style.TextOverflow
 import com.max.agent.auth.OwnerAuth
 import com.max.agent.core.MaxIdentity
 import com.max.agent.core.MaxSystem
@@ -74,7 +75,17 @@ val MatrixFont = FontFamily.Monospace
 
 @Composable
 fun MatrixText(text: String, color: Color = GhostWhite, size: Int = 12, weight: FontWeight = FontWeight.Normal, modifier: Modifier = Modifier) {
-    Text(text = text, color = color, fontSize = size.sp, fontFamily = MatrixFont, fontWeight = weight, modifier = modifier, letterSpacing = 1.sp)
+    Text(
+        text = text,
+        color = color,
+        fontSize = size.sp,
+        fontFamily = MatrixFont,
+        fontWeight = weight,
+        modifier = modifier,
+        letterSpacing = 1.sp,
+        softWrap = true,
+        overflow = TextOverflow.Visible
+    )
 }
 
 @Composable
@@ -464,9 +475,11 @@ private fun ModelsTab(max: MaxSystem) {
                 treeUri = uri,
                 onProgress = { name -> importStatus = "Importing $name…" },
                 onComplete = { count ->
-                    importStatus = if (count > 0) "Imported $count model(s)." else "No .gguf found in that folder."
+                    importStatus = if (count > 0) "Imported $count model(s). Tap RESCAN." else "No .gguf found in that folder."
                 }
             )
+        } else {
+            importStatus = "Folder selection cancelled."
         }
     }
 
@@ -506,7 +519,7 @@ private fun ModelsTab(max: MaxSystem) {
         WireframeButton("SCAN DOWNLOADS FOLDER", WarningYellow, { folderLauncher.launch(null) }, Modifier.fillMaxWidth())
 
         if (importStatus.isNotBlank()) {
-            MatrixText(importStatus, WarningYellow, 10)
+            MatrixText(importStatus, WarningYellow, 10, modifier = Modifier.fillMaxWidth())
         }
 
         if (available.isEmpty()) {
@@ -517,8 +530,8 @@ private fun ModelsTab(max: MaxSystem) {
             LazyColumn(Modifier.weight(1f).fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(8.dp)) {
                 items(available) { entry ->
                     Column(Modifier.fillMaxWidth().border(1.dp, GhostDim.copy(alpha = 0.5f), CutCornerShape(6.dp)).padding(10.dp)) {
-                        MatrixText(entry.name, GhostWhite, 11, FontWeight.Bold)
-                        MatrixText(entry.displaySize, GhostDim, 9)
+                        MatrixText(entry.name, GhostWhite, 11, FontWeight.Bold, modifier = Modifier.fillMaxWidth())
+                        MatrixText(entry.displaySize, GhostDim, 9, modifier = Modifier.fillMaxWidth())
                         Spacer(Modifier.height(6.dp))
                         Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                             WireframeButton("→ PRIMARY", CyanCore, {

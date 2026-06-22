@@ -541,7 +541,7 @@ class ModelManager(private val context: Context) {
             tokenizer_path = null,
             config = npuConfig,
             plugin_id = "npu",
-            device_id = null
+            device_id = "dev0"
         )
 
         var loaded = false
