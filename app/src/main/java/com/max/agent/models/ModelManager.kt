@@ -16,6 +16,7 @@ import com.nexa.sdk.bean.LlmApplyChatTemplateOutput
 import com.nexa.sdk.bean.LlmCreateInput
 import com.nexa.sdk.bean.LlmStreamResult
 import com.nexa.sdk.bean.ModelConfig
+import com.max.agent.MaxApplication
 import kotlinx.coroutines.*
 import kotlinx.coroutines.flow.*
 import kotlinx.coroutines.sync.Mutex
@@ -150,7 +151,7 @@ class ModelManager(private val context: Context) {
     suspend fun applyChatTemplateForSlot(slot: Slot, messages: List<ChatMessage>): String? {
         val wrapper = (if (slot == Slot.EVERYDAY) everydayWrapper else coderWrapper) ?: return null
         return runCatching {
-            wrapper.applyChatTemplate(messages.toTypedArray(), "", false, false)
+            wrapper.applyChatTemplate(messages.toTypedArray(), null, false, false)
                 .getOrThrow().formattedText
         }.onFailure { appendErrorLog(it) }.getOrNull()
     }
@@ -521,6 +522,14 @@ class ModelManager(private val context: Context) {
         entry: ModelEntry,
         stateFlow: MutableStateFlow<ModelState>
     ): Boolean {
+        // ── Guard: Nexa SDK must be initialized before any model load ──
+        if (!MaxApplication.sdkInitialized) {
+            val errMsg = MaxApplication.sdkInitError ?: "Nexa SDK not initialized"
+            stateFlow.value = ModelState(error = errMsg)
+            appendErrorLog(RuntimeException("SDK init guard: $errMsg"))
+            return false
+        }
+
         val ramGb = getTotalRamGb()
         val contextSize = computeAdaptiveContext(ramGb)
 
@@ -529,10 +538,10 @@ class ModelManager(private val context: Context) {
         val npuInput = LlmCreateInput(
             model_name = "",
             model_path = entry.path,
-            tokenizer_path = "",
+            tokenizer_path = null,
             config = npuConfig,
             plugin_id = "npu",
-            device_id = ""
+            device_id = null
         )
 
         var loaded = false
@@ -558,7 +567,7 @@ class ModelManager(private val context: Context) {
         val cpuInput = LlmCreateInput(
             model_name = "",
             model_path = entry.path,
-            tokenizer_path = "",
+            tokenizer_path = null,
             config = cpuConfig,
             plugin_id = "cpu_gpu",
             device_id = "gpu"
