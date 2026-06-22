@@ -502,7 +502,8 @@ class ModelManager(private val context: Context) {
         stateFlow: MutableStateFlow<ModelState>
     ): Boolean {
         val (pluginId, deviceId, layers) = benchmarkAndGetHardwareProfile(entry)
-        val dynamicContext = if (getTotalRamGb() >= 12) entry.contextLength else 16384
+        // Adaptive context: large models need smaller KV caches to avoid OOM on mobile.
+        val dynamicContext = computeAdaptiveContext(entry, getTotalRamGb())
 
         try {
             val config = ModelConfig(
@@ -535,6 +536,31 @@ class ModelManager(private val context: Context) {
                     appendErrorLog(e)
                 }
 
+            // Fallback: if the preferred profile failed, retry with pure CPU.
+            if (!loaded && pluginId != "cpu_gpu") {
+                appendErrorLog(RuntimeException("Primary profile ($pluginId) failed — falling back to pure CPU."))
+                clearCachedHardwareProfile()
+                val cpuConfig = ModelConfig(nCtx = dynamicContext.coerceAtMost(4096), nGpuLayers = 0)
+                val cpuInput = LlmCreateInput(
+                    model_name = "",
+                    model_path = entry.path,
+                    tokenizer_path = "",
+                    config = cpuConfig,
+                    plugin_id = "cpu_gpu",
+                    device_id = ""
+                )
+                LlmWrapper.builder()
+                    .llmCreateInput(cpuInput)
+                    .build()
+                    .onSuccess { wrapper ->
+                        if (slot == Slot.EVERYDAY) everydayWrapper = wrapper else coderWrapper = wrapper
+                        stateFlow.value = ModelState(isLoaded = true, loadedModel = entry)
+                        writeSlotConfig(slot, entry.path)
+                        loaded = true
+                    }
+                    .onFailure { e -> appendErrorLog(e) }
+            }
+
             return loaded
         } catch (e: Exception) {
             appendErrorLog(e)
@@ -550,13 +576,13 @@ class ModelManager(private val context: Context) {
 
     private suspend fun releaseSlotInternal(slot: Slot) {
         if (slot == Slot.EVERYDAY) {
-            everydayWrapper?.stopStream()
-            everydayWrapper?.close()
+            runCatching { everydayWrapper?.stopStream() }.onFailure { appendErrorLog(it) }
+            runCatching { everydayWrapper?.close() }.onFailure { appendErrorLog(it) }
             everydayWrapper = null
             _everydayState.value = ModelState()
         } else {
-            coderWrapper?.stopStream()
-            coderWrapper?.close()
+            runCatching { coderWrapper?.stopStream() }.onFailure { appendErrorLog(it) }
+            runCatching { coderWrapper?.close() }.onFailure { appendErrorLog(it) }
             coderWrapper = null
             _coderState.value = ModelState()
         }
@@ -584,8 +610,13 @@ class ModelManager(private val context: Context) {
         val cachedDevice = prefs.getString("deviceId", null)
 
         val ramGb = getTotalRamGb()
+        val modelSizeGb = entry.sizeBytes / 1_073_741_824.0
+
+        // GPU layer budget: scale down for large models to avoid GPU OOM.
         val optimalLayers = when {
-            ramGb >= 12 -> 999
+            modelSizeGb >= 6.0 -> 0       // pure CPU — too large for GPU offload on mobile
+            modelSizeGb >= 4.0 -> 20      // partial offload only
+            ramGb >= 12 -> 999            // small model, lots of RAM — offload everything
             ramGb >= 8 -> 60
             else -> 32
         }
@@ -594,11 +625,23 @@ class ModelManager(private val context: Context) {
             return Triple(cachedPlugin, cachedDevice, optimalLayers)
         }
 
-        val testProfiles = listOf(
-            Triple("npu", null, optimalLayers),      // Qualcomm NPU
-            Triple("cpu_gpu", "gpu", optimalLayers),
-            Triple("cpu_gpu", null, 0)               // pure CPU fallback
-        )
+        // Size-aware benchmark: skip risky profiles for large models.
+        // NPU can crash natively (SIGSEGV) if the plugin is incompatible —
+        // that bypasses all Java try/catch. Don't risk it on big models.
+        val testProfiles = when {
+            modelSizeGb >= 5.0 -> listOf(
+                Triple("cpu_gpu", null, 0)               // straight to CPU, no benchmark
+            )
+            modelSizeGb >= 3.0 -> listOf(
+                Triple("cpu_gpu", "gpu", optimalLayers),  // GPU only, skip NPU
+                Triple("cpu_gpu", null, 0)                // CPU fallback
+            )
+            else -> listOf(
+                Triple("npu", null, optimalLayers),       // small model — NPU is safe to try
+                Triple("cpu_gpu", "gpu", optimalLayers),
+                Triple("cpu_gpu", null, 0)                // pure CPU fallback
+            )
+        }
 
         for ((pluginId, deviceId, layers) in testProfiles) {
             try {
@@ -631,6 +674,31 @@ class ModelManager(private val context: Context) {
             } catch (_: Exception) {}
         }
         return Triple("cpu_gpu", null, 0)
+    }
+
+    /**
+     * Computes an adaptive context window size based on model size and available RAM.
+     * Large models on mobile need smaller KV caches to avoid OOM.
+     */
+    private fun computeAdaptiveContext(entry: ModelEntry, ramGb: Int): Int {
+        val modelSizeGb = entry.sizeBytes / 1_073_741_824.0
+        // KV cache grows with context × model dimensions. Be conservative on mobile.
+        return when {
+            modelSizeGb >= 7.0 -> 2048       // very large model — minimal context
+            modelSizeGb >= 5.0 -> 4096       // large model — small context
+            modelSizeGb >= 3.0 -> 8192       // medium model
+            ramGb >= 12 -> entry.contextLength.coerceAtMost(16384)  // small model, lots of RAM
+            else -> entry.contextLength.coerceAtMost(8192)
+        }
+    }
+
+    /**
+     * Clears the cached hardware profile so the next load re-benchmarks.
+     * Called when a profile fails to load — prevents a bad cache from poisoning every future load.
+     */
+    private fun clearCachedHardwareProfile() {
+        context.getSharedPreferences("nexa_hardware_profile", Context.MODE_PRIVATE)
+            .edit().clear().apply()
     }
 
     // ====================== Utils ======================
