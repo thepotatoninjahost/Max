@@ -496,8 +496,8 @@ class ModelManager(private val context: Context) {
                 stateFlow.value = ModelState(isLoading = true, loadedModel = entry)
 
                 val success = tryHardwareAcceleratedLoad(slot, entry, stateFlow)
-                if (!success) {
-                    stateFlow.value = ModelState(error = "Failed to load model. See error log.")
+                if (!success && stateFlow.value.error == null) {
+                    stateFlow.value = ModelState(error = "Failed to load model — unknown error. Check Log tab.")
                 }
                 onComplete(success)
             }
@@ -523,6 +523,7 @@ class ModelManager(private val context: Context) {
         entry: ModelEntry,
         stateFlow: MutableStateFlow<ModelState>
     ): Boolean {
+        // ── Guard: Nexa SDK must be initialized before any model load ──
         if (!MaxApplication.sdkInitialized) {
             val errMsg = MaxApplication.sdkInitError ?: "Nexa SDK not initialized"
             stateFlow.value = ModelState(error = errMsg)
@@ -532,55 +533,68 @@ class ModelManager(private val context: Context) {
 
         val ramGb = getTotalRamGb()
         val contextSize = computeAdaptiveContext(ramGb)
+        var lastError: String? = null
 
-        // Each attempt: (label, device_id). All use plugin_id="cpu_gpu" (ggml).
-        val attempts = listOf(
-            "NPU" to "dev0",   // Hexagon HTP v81 — primary for S25
-            "GPU" to "gpu",    // Adreno OpenCL — first fallback
-            "CPU" to null       // Pure CPU — last resort
+        // ── Attempt 1: NPU via cpu_gpu plugin (NPU is selected internally by the SDK) ──
+        val npuConfig = ModelConfig(nCtx = contextSize, nGpuLayers = 999)
+        val npuInput = LlmCreateInput(
+            model_name = "",
+            model_path = entry.path,
+            tokenizer_path = null,
+            config = npuConfig,
+            plugin_id = "cpu_gpu",
+            device_id = "npu"
         )
 
-        for ((label, deviceId) in attempts) {
-            stateFlow.value = ModelState(isLoading = true, loadedModel = entry)
+        var loaded = false
+        LlmWrapper.builder()
+            .llmCreateInput(npuInput)
+            .build()
+            .onSuccess { wrapper ->
+                if (slot == Slot.EVERYDAY) everydayWrapper = wrapper else coderWrapper = wrapper
+                stateFlow.value = ModelState(isLoaded = true, loadedModel = entry)
+                writeSlotConfig(slot, entry.path)
+                cacheHardwareProfile("cpu_gpu", "npu")
+                loaded = true
+            }
+            .onFailure { e ->
+                lastError = e.message ?: e.toString()
+                appendErrorLog(e)
+            }
 
-            // Write a crash marker BEFORE the native call. If the app dies
-            // (SIGSEGV), the marker survives and MaxApplication detects it
-            // on next boot, reads logcat, and writes the trace to crash.log.
-            writeCrashMarker(entry, label, deviceId)
+        if (loaded) return true
 
-            val config = ModelConfig(nCtx = contextSize, nGpuLayers = 999)
-            val input = LlmCreateInput(
-                model_name = "",
-                model_path = entry.path,
-                tokenizer_path = null,
-                config = config,
-                plugin_id = "cpu_gpu",
-                device_id = deviceId
-            )
+        // ── Attempt 2: CPU/GPU fallback (only if NPU genuinely failed) ──
+        appendErrorLog(RuntimeException("NPU load failed — attempting CPU/GPU fallback."))
+        val cpuConfig = ModelConfig(nCtx = contextSize, nGpuLayers = 999)
+        val cpuInput = LlmCreateInput(
+            model_name = "",
+            model_path = entry.path,
+            tokenizer_path = null,
+            config = cpuConfig,
+            plugin_id = "cpu_gpu",
+            device_id = "gpu"
+        )
 
-            var loaded = false
-            LlmWrapper.builder()
-                .llmCreateInput(input)
-                .build()
-                .onSuccess { wrapper ->
-                    if (slot == Slot.EVERYDAY) everydayWrapper = wrapper else coderWrapper = wrapper
-                    stateFlow.value = ModelState(isLoaded = true, loadedModel = entry)
-                    writeSlotConfig(slot, entry.path)
-                    cacheHardwareProfile("cpu_gpu", deviceId ?: "")
-                    loaded = true
-                }
-                .onFailure { e ->
-                    appendErrorLog(e)
-                }
+        LlmWrapper.builder()
+            .llmCreateInput(cpuInput)
+            .build()
+            .onSuccess { wrapper ->
+                if (slot == Slot.EVERYDAY) everydayWrapper = wrapper else coderWrapper = wrapper
+                stateFlow.value = ModelState(isLoaded = true, loadedModel = entry)
+                writeSlotConfig(slot, entry.path)
+                cacheHardwareProfile("cpu_gpu", "gpu")
+                loaded = true
+            }
+            .onFailure { e ->
+                lastError = e.message ?: e.toString()
+                appendErrorLog(e)
+            }
 
-            clearCrashMarker()
-
-            if (loaded) return true
-
-            appendErrorLog(RuntimeException("$label load failed — falling back."))
+        if (!loaded && lastError != null) {
+            stateFlow.value = ModelState(error = lastError)
         }
-
-        return false
+        return loaded
     }
 
     // ====================== Native Crash Markers ======================

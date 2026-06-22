@@ -662,12 +662,15 @@ private fun LogTab(max: MaxSystem) {
     val fmt = remember { SimpleDateFormat("HH:mm:ss", Locale.US) }
     val context = androidx.compose.ui.platform.LocalContext.current
     var crashLog by remember { mutableStateOf<String?>(null) }
-    var crashRefresh by remember { mutableIntStateOf(0) }
+    var errorLog by remember { mutableStateOf<String?>(null) }
+    var logRefresh by remember { mutableIntStateOf(0) }
 
-    // Read crash.log if it exists
-    LaunchedEffect(crashRefresh) {
+    // Read crash.log AND errors.log if they exist
+    LaunchedEffect(logRefresh) {
         val crashFile = java.io.File(context.filesDir, "crash.log")
+        val errorFile = java.io.File(context.filesDir, "errors.log")
         crashLog = if (crashFile.exists()) crashFile.readText() else null
+        errorLog = if (errorFile.exists()) errorFile.readText() else null
     }
 
     Column(Modifier.fillMaxSize().padding(12.dp)) {
@@ -682,10 +685,28 @@ private fun LogTab(max: MaxSystem) {
                 MatrixText(crashLog!!.take(800), AlertRed, 9)
                 Spacer(Modifier.height(8.dp))
                 Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                    WireframeButton("REFRESH", GhostDim, { crashRefresh++ }, Modifier.weight(1f).height(34.dp))
+                    WireframeButton("REFRESH", GhostDim, { logRefresh++ }, Modifier.weight(1f).height(34.dp))
                     WireframeButton("CLEAR", AlertRed, {
                         java.io.File(context.filesDir, "crash.log").delete()
                         crashLog = null
+                    }, Modifier.weight(1f).height(34.dp))
+                }
+            }
+        }
+
+        // ── Error log (model load failures, SDK errors, etc.) ──
+        if (errorLog != null) {
+            Spacer(Modifier.height(8.dp))
+            Column(Modifier.fillMaxWidth().border(1.dp, WarningYellow, CutCornerShape(6.dp)).background(WarningYellow.copy(alpha = 0.08f)).padding(10.dp)) {
+                MatrixText("ERROR LOG", WarningYellow, 12, FontWeight.Bold)
+                Spacer(Modifier.height(6.dp))
+                MatrixText(errorLog!!.take(1200), GhostWhite, 9, modifier = Modifier.fillMaxWidth())
+                Spacer(Modifier.height(8.dp))
+                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    WireframeButton("REFRESH", GhostDim, { logRefresh++ }, Modifier.weight(1f).height(34.dp))
+                    WireframeButton("CLEAR", WarningYellow, {
+                        java.io.File(context.filesDir, "errors.log").delete()
+                        errorLog = null
                     }, Modifier.weight(1f).height(34.dp))
                 }
             }
