@@ -496,8 +496,8 @@ class ModelManager(private val context: Context) {
                 stateFlow.value = ModelState(isLoading = true, loadedModel = entry)
 
                 val success = tryHardwareAcceleratedLoad(slot, entry, stateFlow)
-                if (!success) {
-                    stateFlow.value = ModelState(error = "Failed to load model. See error log.")
+                if (!success && stateFlow.value.error == null) {
+                    stateFlow.value = ModelState(error = "Failed to load model — unknown error. Check Log tab.")
                 }
                 onComplete(success)
             }
@@ -540,12 +540,11 @@ class ModelManager(private val context: Context) {
             "CPU" to null       // Pure CPU — last resort
         )
 
+        var lastError: String? = null
+
         for ((label, deviceId) in attempts) {
             stateFlow.value = ModelState(isLoading = true, loadedModel = entry)
 
-            // Write a crash marker BEFORE the native call. If the app dies
-            // (SIGSEGV), the marker survives and MaxApplication detects it
-            // on next boot, reads logcat, and writes the trace to crash.log.
             writeCrashMarker(entry, label, deviceId)
 
             val config = ModelConfig(nCtx = contextSize, nGpuLayers = 999)
@@ -570,6 +569,7 @@ class ModelManager(private val context: Context) {
                     loaded = true
                 }
                 .onFailure { e ->
+                    lastError = "${e::class.simpleName}: ${e.message ?: e.toString()}"
                     appendErrorLog(e)
                 }
 
@@ -577,7 +577,13 @@ class ModelManager(private val context: Context) {
 
             if (loaded) return true
 
-            appendErrorLog(RuntimeException("$label load failed — falling back."))
+            val nextLabel = attempts.getOrNull(attempts.indexOfFirst { it.first == label } + 1)?.first
+            val fallbackMsg = if (nextLabel != null) " — falling back to $nextLabel" else ""
+            appendErrorLog(RuntimeException("$label load failed: $lastError$fallbackMsg"))
+        }
+
+        if (lastError != null) {
+            stateFlow.value = ModelState(error = lastError!!.take(200))
         }
 
         return false
