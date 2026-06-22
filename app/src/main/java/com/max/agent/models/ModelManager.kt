@@ -101,7 +101,14 @@ class ModelManager(private val context: Context) {
     val transfer: StateFlow<TransferState> = _transfer.asStateFlow()
 
     init {
-        loadSavedSlots()
+        // Do NOT auto-load saved slots on startup. Previous code did this,
+        // which created a crash loop: if a model crashed during load, the path
+        // was saved, and every subsequent launch tried to reload it and crashed
+        // again before the UI even appeared.
+        //
+        // Saved slots are now loaded lazily — the user loads manually from
+        // the Models tab. loadSlotConfig() exposes the saved paths for the
+        // UI to show "last loaded" hints without actually loading.
         scan()
         preWarmAllModels()
     }

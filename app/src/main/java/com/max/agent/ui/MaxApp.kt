@@ -647,9 +647,37 @@ private fun LogTab(max: MaxSystem) {
     val entries by max.actionLog.entries.collectAsState()
     val tampered by max.actionLog.tampered.collectAsState()
     val fmt = remember { SimpleDateFormat("HH:mm:ss", Locale.US) }
+    val context = androidx.compose.ui.platform.LocalContext.current
+    var crashLog by remember { mutableStateOf<String?>(null) }
+    var crashRefresh by remember { mutableIntStateOf(0) }
+
+    // Read crash.log if it exists
+    LaunchedEffect(crashRefresh) {
+        val crashFile = java.io.File(context.filesDir, "crash.log")
+        crashLog = if (crashFile.exists()) crashFile.readText() else null
+    }
 
     Column(Modifier.fillMaxSize().padding(12.dp)) {
         MatrixText("AUDIT STREAM", CyanCore, 14, FontWeight.Black)
+
+        // ── Crash log banner (shown if app crashed on last run) ──
+        if (crashLog != null) {
+            Spacer(Modifier.height(8.dp))
+            Column(Modifier.fillMaxWidth().border(2.dp, AlertRed, CutCornerShape(6.dp)).background(AlertRed.copy(alpha = 0.15f)).padding(10.dp)) {
+                MatrixText("⚠ LAST CRASH CAPTURED — READ TO ZO", AlertRed, 12, FontWeight.Black)
+                Spacer(Modifier.height(6.dp))
+                MatrixText(crashLog!!.take(800), AlertRed, 9)
+                Spacer(Modifier.height(8.dp))
+                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    WireframeButton("REFRESH", GhostDim, { crashRefresh++ }, Modifier.weight(1f).height(34.dp))
+                    WireframeButton("CLEAR", AlertRed, {
+                        java.io.File(context.filesDir, "crash.log").delete()
+                        crashLog = null
+                    }, Modifier.weight(1f).height(34.dp))
+                }
+            }
+        }
+
         if (tampered) {
             Box(Modifier.fillMaxWidth().border(2.dp, AlertRed, CutCornerShape(6.dp)).background(AlertRed.copy(alpha = 0.15f)).padding(10.dp)) {
                 MatrixText("⚠ LOG TAMPER DETECTED — SYSTEM LOCKED (RULE 6)", AlertRed, 12, FontWeight.Black)

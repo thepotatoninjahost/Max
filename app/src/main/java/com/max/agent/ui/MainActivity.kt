@@ -28,6 +28,24 @@ class MainActivity : FragmentActivity() {
     private lateinit var vpnConsentLauncher: ActivityResultLauncher<Intent>
 
     override fun onCreate(savedInstanceState: Bundle?) {
+        // Install global crash handler FIRST — before any SDK init.
+        // Captures any uncaught exception (including OutOfMemoryError) to a
+        // file the user can read back to us for diagnosis.
+        val crashFile = java.io.File(filesDir, "crash.log")
+        val previousHandler = Thread.getDefaultUncaughtExceptionHandler()
+        Thread.setDefaultUncaughtExceptionHandler { thread, throwable ->
+            try {
+                crashFile.writeText(
+                    "CRASH: ${java.text.SimpleDateFormat("yyyy-MM-dd HH:mm:ss", java.util.Locale.US).format(java.util.Date())}\n" +
+                    "Thread: ${thread.name}\n" +
+                    "Exception: ${throwable.javaClass.name}\n" +
+                    "Message: ${throwable.message}\n\n" +
+                    throwable.stackTraceToString().take(3000)
+                )
+            } catch (_: Throwable) {}
+            previousHandler?.uncaughtException(thread, throwable)
+        }
+
         super.onCreate(savedInstanceState)
         enableEdgeToEdge()
 
