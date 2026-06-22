@@ -1,6 +1,7 @@
 package com.max.agent.ui
 
 import android.Manifest
+import android.content.Intent
 import android.net.Uri
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
@@ -437,6 +438,37 @@ private fun ModelsTab(max: MaxSystem) {
     val everyday by max.modelManager.everydayState.collectAsState()
     val coder by max.modelManager.coderState.collectAsState()
     val transfer by max.modelManager.transfer.collectAsState()
+    val context = LocalContext.current
+    var importStatus by remember { mutableStateOf("") }
+
+    val fileLauncher = rememberLauncherForActivityResult(
+        ActivityResultContracts.OpenDocument()
+    ) { uri ->
+        if (uri != null) {
+            context.contentResolver.takePersistableUriPermission(
+                uri, Intent.FLAG_GRANT_READ_URI_PERMISSION
+            )
+            importStatus = "Importing file…"
+            max.modelManager.importFromUri(uri) { success ->
+                importStatus = if (success) "Imported." else "Import failed — not a valid .gguf?"
+            }
+        }
+    }
+
+    val folderLauncher = rememberLauncherForActivityResult(
+        ActivityResultContracts.OpenDocumentTree()
+    ) { uri ->
+        if (uri != null) {
+            importStatus = "Scanning folder for .gguf…"
+            max.modelManager.scanAndImportFromTree(
+                treeUri = uri,
+                onProgress = { name -> importStatus = "Importing $name…" },
+                onComplete = { count ->
+                    importStatus = if (count > 0) "Imported $count model(s)." else "No .gguf found in that folder."
+                }
+            )
+        }
+    }
 
     Column(Modifier.fillMaxSize().padding(12.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
         MatrixText("COMPUTE CORES", CyanCore, 14, FontWeight.Black)
@@ -470,10 +502,16 @@ private fun ModelsTab(max: MaxSystem) {
         }
 
         WireframeButton("RESCAN STORAGE", CyanCore, { max.modelManager.scan() }, Modifier.fillMaxWidth())
+        WireframeButton("IMPORT .gguf FILE", CyanCore, { fileLauncher.launch(arrayOf("*/*")) }, Modifier.fillMaxWidth())
+        WireframeButton("SCAN DOWNLOADS FOLDER", WarningYellow, { folderLauncher.launch(null) }, Modifier.fillMaxWidth())
+
+        if (importStatus.isNotBlank()) {
+            MatrixText(importStatus, WarningYellow, 10)
+        }
 
         if (available.isEmpty()) {
             Box(Modifier.weight(1f).fillMaxWidth(), contentAlignment = Alignment.Center) {
-                MatrixText("NO LOCAL MODELS — IMPORT A .gguf", GhostDim, 11)
+                MatrixText("NO LOCAL MODELS — IMPORT A .gguf OR SCAN YOUR DOWNLOADS FOLDER", GhostDim, 11)
             }
         } else {
             LazyColumn(Modifier.weight(1f).fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(8.dp)) {
