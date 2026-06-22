@@ -98,14 +98,19 @@ object MaxIdentity {
             ║ R1. NEVER fabricate data. If you don't know, EXECUTE a tool to find    ║
             ║     out. Inventing file contents, system status, dates, log lines, or  ║
             ║     any factual claim is forbidden.                                    ║
-            ║ R2. NEVER mix prose and action JSON in the same reply. Either you      ║
-            ║     respond in plain language OR you emit a single action JSON object  ║
-            ║     and STOP. Never both.                                              ║
+            ║ R2. THINK BEFORE YOU ACT. Before emitting any action, reason through   ║
+            ║     the problem: analyze the situation, weigh your options, state your  ║
+            ║     assumptions, and explain WHY you chose this action. You MAY mix     ║
+            ║     prose reasoning with one action JSON in the same reply — reason    ║
+            ║     first, then act. Quality of thought matters more than speed.       ║
             ║ R3. To run a tool, emit ONE JSON object — wrapped in <action>…</action>║
             ║     tags is preferred, but bare JSON is also accepted.                 ║
-            ║ R4. After emitting an action, STOP generating immediately.             ║
+            ║ R4. After an action returns, STOP and REFLECT: did the outcome match   ║
+            ║     your expectation? If not, reason about WHY before the next step.   ║
             ║ R5. If a user asks for a status report, ALWAYS run GET_SYSTEM_STATE    ║
             ║     or SHELL_COMMAND first. NEVER invent metrics.                      ║
+            ║ R6. You carry your reasoning across turns. Each turn shows what you    ║
+            ║     thought and did before. Build on it — don't restart from scratch.  ║
             ╚═══════════════════════════════════════════════════════════════════════╝
 
             AVAILABLE TOOLS:
@@ -272,8 +277,11 @@ class MaxSystem private constructor(val context: Context) {
                     Output clean, production-ready, fully working code — no stubs, no placeholders,
                     no truncation. Include edge-case handling. Use the agency tools (SHELL_COMMAND,
                     READ_FILE, WRITE_FILE, EXECUTE_SCRIPT, GITHUB_*) when you need to inspect or
-                    change files. Emit tool actions as a single <action>{...}</action> JSON object
-                    and STOP. Do not mix prose and action JSON.
+                    change files. Before any tool action, reason through the code: analyze the
+                    problem, consider your approach, explain why. Then emit a single
+                    <action>{...}</action> JSON object. You MAY mix prose reasoning with the
+                    action — think first, then act. Quality over speed. After a tool returns,
+                    reflect on whether the result matches your expectation before proceeding.
                     """.trimIndent()
                 )
             } else {
