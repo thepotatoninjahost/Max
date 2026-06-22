@@ -505,18 +505,16 @@ class ModelManager(private val context: Context) {
     }
 
     /**
-     * Architecture: ggml NPU offload via cpu_gpu plugin + dev0 device.
+     * GGUF model loading via llama_cpp plugin with automatic NPU offload.
      *
-     * CRITICAL: plugin_id="npu" is the QNN plugin — it needs QNN-compiled
-     * context binaries, NOT .gguf files. Passing a .gguf to the QNN plugin
-     * causes a native SIGSEGV in llm.create() that Java try/catch cannot
-     * catch (that's why the crash log was always empty).
+     * Per Qualcomm's official demo (qualcomm/nexa-sdk):
+     *   plugin_id = "llama_cpp"  (reads .gguf files, supports NPU offload)
+     *   device_id = "hybrid"     (per-tensor HTP+CPU — FAST PATH on Snapdragon)
+     *            | "npu"         (pinned single HTP session)
+     *            | "gpu"         (Adreno OpenCL)
+     *            | "cpu"         (pure CPU, nGpuLayers=0)
      *
-     * For .gguf models with NPU acceleration on Snapdragon (S25):
-     *   plugin_id = "cpu_gpu"  (ggml backend — reads .gguf)
-     *   device_id = "dev0"     (NPU — offloads via libggml-htp-v81.so)
-     *
-     * Fallback chain: NPU → GPU → CPU, all through the cpu_gpu plugin.
+     * Fallback chain: HYBRID → NPU → CPU.
      */
     private suspend fun tryHardwareAcceleratedLoad(
         slot: Slot,
@@ -533,27 +531,32 @@ class ModelManager(private val context: Context) {
         val ramGb = getTotalRamGb()
         val contextSize = computeAdaptiveContext(ramGb)
 
-        // Each attempt: (label, device_id). All use plugin_id="cpu_gpu" (ggml).
+        // GGUF models use plugin_id="llama_cpp". device_id selects the compute unit.
+        // Per Qualcomm's official demo (qualcomm/nexa-sdk):
+        //   "hybrid" = per-tensor HTP+CPU scheduler — the FAST PATH on Snapdragon
+        //   "npu"    = pinned single HTP session — deterministic but slower
+        //   "gpu"    = Adreno OpenCL
+        //   "cpu"    = pure CPU, nGpuLayers=0
         val attempts = listOf(
-            "NPU" to "dev0",   // Hexagon HTP v81 — primary for S25
-            "GPU" to "gpu",    // Adreno OpenCL — first fallback
-            "CPU" to null       // Pure CPU — last resort
+            Triple("HYBRID", "hybrid", 999),  // Snapdragon fast path — primary
+            Triple("NPU",    "npu",    999),  // Pinned HTP — deterministic fallback
+            Triple("CPU",    "cpu",    0)     // Pure CPU — last resort
         )
 
         var lastError: String? = null
 
-        for ((label, deviceId) in attempts) {
+        for ((label, deviceId, nGpuLayers) in attempts) {
             stateFlow.value = ModelState(isLoading = true, loadedModel = entry)
 
             writeCrashMarker(entry, label, deviceId)
 
-            val config = ModelConfig(nCtx = contextSize, nGpuLayers = 999)
+            val config = ModelConfig(nCtx = contextSize, nGpuLayers = nGpuLayers)
             val input = LlmCreateInput(
                 model_name = "",
                 model_path = entry.path,
                 tokenizer_path = null,
                 config = config,
-                plugin_id = "cpu_gpu",
+                plugin_id = "llama_cpp",
                 device_id = deviceId
             )
 
@@ -565,7 +568,7 @@ class ModelManager(private val context: Context) {
                     if (slot == Slot.EVERYDAY) everydayWrapper = wrapper else coderWrapper = wrapper
                     stateFlow.value = ModelState(isLoaded = true, loadedModel = entry)
                     writeSlotConfig(slot, entry.path)
-                    cacheHardwareProfile("cpu_gpu", deviceId ?: "")
+                    cacheHardwareProfile("llama_cpp", deviceId)
                     loaded = true
                 }
                 .onFailure { e ->
