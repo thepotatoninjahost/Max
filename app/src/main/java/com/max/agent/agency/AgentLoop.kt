@@ -75,7 +75,7 @@ class AgentLoop(
             val resultMsg = "[ENVIRONMENT — result of your ${actionParsed!!.type} action]\n" +
                 "Success: ${result.success}\n" +
                 "Output: ${result.output.take(1000)}" +
-                (if (!result.success && result.error.isNotBlank()) "\nError: ${result.error}" else "")
+                (if (!result.success && !result.error.isNullOrBlank()) "\nError: ${result.error}" else "")
             messages.add(ChatMessage("user", resultMsg))
             currentTurn++
         }
