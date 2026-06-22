@@ -43,7 +43,7 @@ class AgentLoop(
                 if (res is LlmStreamResult.Token) {
                     responseBuilder.append(res.text)
                     onToken?.invoke(res.text)
-                    if (responseBuilder.length > 8000) {
+                    if (responseBuilder.length > 12000) {
                         modelManager.stopSlotStream(slot)
                     }
                     if (responseBuilder.contains("</action>")) {
@@ -63,6 +63,7 @@ class AgentLoop(
                 break
             }
 
+            messages.add(ChatMessage("assistant", responseBuilder.toString()))
             onStep?.invoke("[action] ${actionParsed!!.type}")
             val result = agency.executeAction(actionParsed!!)
             onStep?.invoke(if (result.success) "[ok] ${result.output.take(120)}" else "[fail] ${result.error}")
@@ -71,7 +72,10 @@ class AgentLoop(
                 return@withContext "FATAL SYSTEM ERROR: ${result.error}"
             }
 
-            val resultMsg = "Result: ${result.success}. Output: ${result.output.take(1000)}"
+            val resultMsg = "[ENVIRONMENT — result of your ${actionParsed!!.type} action]\n" +
+                "Success: ${result.success}\n" +
+                "Output: ${result.output.take(1000)}" +
+                (if (!result.success && result.error.isNotBlank()) "\nError: ${result.error}" else "")
             messages.add(ChatMessage("user", resultMsg))
             currentTurn++
         }
