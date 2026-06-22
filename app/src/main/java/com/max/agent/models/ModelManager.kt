@@ -505,24 +505,24 @@ class ModelManager(private val context: Context) {
     }
 
     /**
-     * Architecture: NPU-first, catch-and-fallback. No benchmark loading.
+     * Architecture: ggml NPU offload via cpu_gpu plugin + dev0 device.
      *
-     * The S25's Snapdragon NPU is the correct acceleration path for Nexa SDK.
-     * We do NOT pre-load the model to test the plugin — that double-loads into
-     * NPU memory and crashes. Instead:
+     * CRITICAL: plugin_id="npu" is the QNN plugin — it needs QNN-compiled
+     * context binaries, NOT .gguf files. Passing a .gguf to the QNN plugin
+     * causes a native SIGSEGV in llm.create() that Java try/catch cannot
+     * catch (that's why the crash log was always empty).
      *
-     *   1. Try NPU directly with full layer offload.
-     *   2. If it fails, try CPU/GPU.
-     *   3. If that fails, report error.
+     * For .gguf models with NPU acceleration on Snapdragon (S25):
+     *   plugin_id = "cpu_gpu"  (ggml backend — reads .gguf)
+     *   device_id = "dev0"     (NPU — offloads via libggml-htp-v81.so)
      *
-     * The successful profile is cached so subsequent loads skip the fallback path.
+     * Fallback chain: NPU → GPU → CPU, all through the cpu_gpu plugin.
      */
     private suspend fun tryHardwareAcceleratedLoad(
         slot: Slot,
         entry: ModelEntry,
         stateFlow: MutableStateFlow<ModelState>
     ): Boolean {
-        // ── Guard: Nexa SDK must be initialized before any model load ──
         if (!MaxApplication.sdkInitialized) {
             val errMsg = MaxApplication.sdkInitError ?: "Nexa SDK not initialized"
             stateFlow.value = ModelState(error = errMsg)
@@ -533,61 +533,74 @@ class ModelManager(private val context: Context) {
         val ramGb = getTotalRamGb()
         val contextSize = computeAdaptiveContext(ramGb)
 
-        // ── Attempt 1: NPU (the correct path for Snapdragon S25) ──
-        val npuConfig = ModelConfig(nCtx = contextSize, nGpuLayers = 999)
-        val npuInput = LlmCreateInput(
-            model_name = "",
-            model_path = entry.path,
-            tokenizer_path = null,
-            config = npuConfig,
-            plugin_id = "npu",
-            device_id = "dev0"
+        // Each attempt: (label, device_id). All use plugin_id="cpu_gpu" (ggml).
+        val attempts = listOf(
+            "NPU" to "dev0",   // Hexagon HTP v81 — primary for S25
+            "GPU" to "gpu",    // Adreno OpenCL — first fallback
+            "CPU" to null       // Pure CPU — last resort
         )
 
-        var loaded = false
-        LlmWrapper.builder()
-            .llmCreateInput(npuInput)
-            .build()
-            .onSuccess { wrapper ->
-                if (slot == Slot.EVERYDAY) everydayWrapper = wrapper else coderWrapper = wrapper
-                stateFlow.value = ModelState(isLoaded = true, loadedModel = entry)
-                writeSlotConfig(slot, entry.path)
-                cacheHardwareProfile("npu", "")
-                loaded = true
-            }
-            .onFailure { e ->
-                appendErrorLog(e)
-            }
+        for ((label, deviceId) in attempts) {
+            stateFlow.value = ModelState(isLoading = true, loadedModel = entry)
 
-        if (loaded) return true
+            // Write a crash marker BEFORE the native call. If the app dies
+            // (SIGSEGV), the marker survives and MaxApplication detects it
+            // on next boot, reads logcat, and writes the trace to crash.log.
+            writeCrashMarker(entry, label, deviceId)
 
-        // ── Attempt 2: CPU/GPU fallback (only if NPU genuinely failed) ──
-        appendErrorLog(RuntimeException("NPU load failed — attempting CPU/GPU fallback."))
-        val cpuConfig = ModelConfig(nCtx = contextSize, nGpuLayers = 999)
-        val cpuInput = LlmCreateInput(
-            model_name = "",
-            model_path = entry.path,
-            tokenizer_path = null,
-            config = cpuConfig,
-            plugin_id = "cpu_gpu",
-            device_id = "gpu"
-        )
+            val config = ModelConfig(nCtx = contextSize, nGpuLayers = 999)
+            val input = LlmCreateInput(
+                model_name = "",
+                model_path = entry.path,
+                tokenizer_path = null,
+                config = config,
+                plugin_id = "cpu_gpu",
+                device_id = deviceId
+            )
 
-        LlmWrapper.builder()
-            .llmCreateInput(cpuInput)
-            .build()
-            .onSuccess { wrapper ->
-                if (slot == Slot.EVERYDAY) everydayWrapper = wrapper else coderWrapper = wrapper
-                stateFlow.value = ModelState(isLoaded = true, loadedModel = entry)
-                writeSlotConfig(slot, entry.path)
-                cacheHardwareProfile("cpu_gpu", "gpu")
-                loaded = true
+            var loaded = false
+            LlmWrapper.builder()
+                .llmCreateInput(input)
+                .build()
+                .onSuccess { wrapper ->
+                    if (slot == Slot.EVERYDAY) everydayWrapper = wrapper else coderWrapper = wrapper
+                    stateFlow.value = ModelState(isLoaded = true, loadedModel = entry)
+                    writeSlotConfig(slot, entry.path)
+                    cacheHardwareProfile("cpu_gpu", deviceId ?: "")
+                    loaded = true
+                }
+                .onFailure { e ->
+                    appendErrorLog(e)
+                }
+
+            clearCrashMarker()
+
+            if (loaded) return true
+
+            appendErrorLog(RuntimeException("$label load failed — falling back."))
+        }
+
+        return false
+    }
+
+    // ====================== Native Crash Markers ======================
+
+    private fun writeCrashMarker(entry: ModelEntry, deviceLabel: String, deviceId: String?) {
+        try {
+            val marker = File(context.filesDir, "native_crash_marker.json")
+            val json = JSONObject().apply {
+                put("model", entry.name)
+                put("modelPath", entry.path)
+                put("device", deviceLabel)
+                put("deviceId", deviceId ?: "null")
+                put("timestamp", System.currentTimeMillis())
             }
-            .onFailure { e ->
-                appendErrorLog(e)
-            }
+            marker.writeText(json.toString())
+        } catch (_: Exception) {}
+    }
 
-        return loaded
+    private fun clearCrashMarker() {
+        try { File(context.filesDir, "native_crash_marker.json").delete() } catch (_: Exception) {}
     }
 
     /**
