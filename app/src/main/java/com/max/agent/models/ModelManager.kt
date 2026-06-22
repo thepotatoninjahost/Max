@@ -1,8 +1,10 @@
 package com.max.agent.models
 
 import android.content.Context
+import android.content.Intent
 import android.net.Uri
 import android.os.StatFs
+import android.provider.DocumentsContract
 import android.provider.OpenableColumns
 import android.system.Os
 import android.system.OsConstants
@@ -348,6 +350,129 @@ class ModelManager(private val context: Context) {
                 dest?.delete()
                 onComplete(false)
             }
+        }
+    }
+
+    /**
+     * Scans a Storage Access Framework directory tree (e.g. the Downloads folder)
+     * for .gguf model files and imports every one found into the local models
+     * directory. Recurses into subdirectories. No storage permissions required —
+     * the user grants URI access via ACTION_OPEN_DOCUMENT_TREE and we persist it.
+     *
+     * @param treeUri The tree URI returned by OpenDocumentTree
+     * @param onProgress Optional callback with the name of each file being imported
+     * @param onComplete Called on the IO scope with the count of imported models
+     */
+    fun scanAndImportFromTree(
+        treeUri: Uri,
+        onProgress: (String) -> Unit = {},
+        onComplete: (Int) -> Unit = {}
+    ) {
+        scope.launch {
+            var imported = 0
+            try {
+                context.contentResolver.takePersistableUriPermission(
+                    treeUri,
+                    Intent.FLAG_GRANT_READ_URI_PERMISSION
+                )
+                val docId = DocumentsContract.getTreeDocumentId(treeUri)
+                val childrenUri = DocumentsContract.buildChildDocumentsUriUsingTree(treeUri, docId)
+                imported = walkTreeAndImport(childrenUri, onProgress)
+                scan()
+            } catch (e: Exception) {
+                appendErrorLog(e)
+            } finally {
+                _transfer.value = TransferState()
+            }
+            onComplete(imported)
+        }
+    }
+
+    /**
+     * Recursively walks a SAF documents tree, importing every .gguf file found.
+     */
+    private suspend fun walkTreeAndImport(
+        childrenUri: Uri,
+        onProgress: (String) -> Unit
+    ): Int {
+        var imported = 0
+        val projection = arrayOf(
+            DocumentsContract.Document.COLUMN_DOCUMENT_ID,
+            DocumentsContract.Document.COLUMN_DISPLAY_NAME,
+            DocumentsContract.Document.COLUMN_MIME_TYPE,
+            DocumentsContract.Document.COLUMN_SIZE
+        )
+        try {
+            context.contentResolver.query(childrenUri, projection, null, null, null)?.use { cursor ->
+                while (cursor.moveToNext()) {
+                    val docId = cursor.getString(0)
+                    val name = cursor.getString(1) ?: continue
+                    val mime = cursor.getString(2)
+                    val size = cursor.getLong(3)
+
+                    if (DocumentsContract.Document.MIME_TYPE_DIR == mime) {
+                        val subChildren = DocumentsContract.buildChildDocumentsUriUsingTree(childrenUri, docId)
+                        imported += walkTreeAndImport(subChildren, onProgress)
+                    } else if (name.endsWith(".gguf", ignoreCase = true)) {
+                        val fileUri = DocumentsContract.buildDocumentUriUsingTree(childrenUri, docId)
+                        onProgress(name)
+                        _transfer.value = TransferState(
+                            active = true,
+                            label = "Importing",
+                            fileName = name,
+                            totalBytes = size
+                        )
+                        val dest = File(modelsDir, ensureGgufExtension(name))
+                        if (dest.exists()) {
+                            _transfer.value = TransferState(active = false, label = "Already imported: $name")
+                            imported++
+                            continue
+                        }
+                        if (!hasEnoughSpace(size)) {
+                            _transfer.value = TransferState(error = "Not enough storage for $name")
+                            continue
+                        }
+                        val success = copyUriToFile(fileUri, dest, size)
+                        if (success && validateGguf(dest)) {
+                            imported++
+                            _transfer.value = TransferState(active = false, label = "Imported: $name")
+                        } else {
+                            dest.delete()
+                            _transfer.value = TransferState(error = "Invalid or failed: $name")
+                        }
+                    }
+                }
+            }
+        } catch (e: Exception) {
+            appendErrorLog(e)
+        }
+        return imported
+    }
+
+    /**
+     * Copies a content URI to a local file with progress tracking.
+     */
+    private fun copyUriToFile(uri: Uri, dest: File, expectedSize: Long): Boolean {
+        return try {
+            context.contentResolver.openInputStream(uri)?.use { input ->
+                FileOutputStream(dest).use { output ->
+                    val buf = ByteArray(8192)
+                    var read: Int
+                    var total = 0L
+                    while (input.read(buf).also { read = it } > 0) {
+                        output.write(buf, 0, read)
+                        total += read
+                        _transfer.value = _transfer.value.copy(
+                            bytesTransferred = total,
+                            progress = if (expectedSize > 0) (total.toFloat() / expectedSize) else 0f
+                        )
+                    }
+                }
+            } ?: return false
+            true
+        } catch (e: Exception) {
+            appendErrorLog(e)
+            false
         }
     }
 
