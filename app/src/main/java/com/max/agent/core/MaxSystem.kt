@@ -277,6 +277,7 @@ class MaxSystem private constructor(val context: Context) {
             ?: return ModelManager.Slot.EVERYDAY
 
         val sb = StringBuilder()
+        var streamErrored = false
         try {
             modelManager.generateStreamFlowForSlot(
                 ModelManager.Slot.EVERYDAY, prompt, maxTokens = 10
@@ -286,13 +287,18 @@ class MaxSystem private constructor(val context: Context) {
                         sb.append(result.text)
                         if (sb.length > 20) modelManager.stopSlotStream(ModelManager.Slot.EVERYDAY)
                     }
-                    is com.nexa.sdk.bean.LlmStreamResult.Error -> return ModelManager.Slot.EVERYDAY
+                    is com.nexa.sdk.bean.LlmStreamResult.Error -> {
+                        streamErrored = true
+                        modelManager.stopSlotStream(ModelManager.Slot.EVERYDAY)
+                    }
                     is com.nexa.sdk.bean.LlmStreamResult.Completed -> Unit
                 }
             }
         } catch (e: Exception) {
             return ModelManager.Slot.EVERYDAY
         }
+
+        if (streamErrored) return ModelManager.Slot.EVERYDAY
 
         val response = sb.toString().trim().uppercase()
         android.util.Log.i("MaxSystem", "Delta-B classification: '$response' for: ${msg.take(80)}")

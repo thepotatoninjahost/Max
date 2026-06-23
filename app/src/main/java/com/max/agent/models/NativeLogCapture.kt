@@ -60,10 +60,10 @@ class NativeLogCapture {
             return buildString {
                 append("SOC_MFR=${Build.SOC_MANUFACTURER ?: "unknown"}")
                 append(" SOC_MODEL=${Build.SOC_MODEL ?: "unknown"}")
-                append(" BOARD=${Build.BOARD}")
-                append(" HW=${Build.HARDWARE}")
-                append(" DEVICE=${Build.DEVICE}")
-                append(" MODEL=${Build.MODEL}")
+                append(" BOARD=${Build.BOARD ?: "unknown"}")
+                append(" HW=${Build.HARDWARE ?: "unknown"}")
+                append(" DEVICE=${Build.DEVICE ?: "unknown"}")
+                append(" MODEL=${Build.MODEL ?: "unknown"}")
                 append(" NPU_SUPPORTED=${isNpuSupported()}")
             }
         }
@@ -88,7 +88,7 @@ class NativeLogCapture {
                     var line: String?
                     while (reader.readLine().also { line = it } != null) {
                         // Filter for relevant log lines — native SDK, errors, and our tags
-                        val lower = line.lowercase()
+                        val lower = line!!.lowercase()
                         if (lower.contains("nexa") ||
                             lower.contains("qnn") ||
                             lower.contains("ggml") ||

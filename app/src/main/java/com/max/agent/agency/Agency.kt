@@ -8,6 +8,7 @@ import com.max.agent.github.GithubEngine
 import com.max.agent.installer.ApkInstaller
 import com.max.agent.models.ModelManager
 import com.max.agent.safety.ActionLog
+import com.max.agent.safety.Constitution
 import com.max.agent.safety.Constitution.RiskLevel
 import com.max.agent.safety.PermissionGate
 import com.max.agent.scripting.ScriptingEngine
