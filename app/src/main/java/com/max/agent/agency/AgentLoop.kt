@@ -55,6 +55,9 @@ class AgentLoop(
                         }
                     }
                     if (actionParsed != null) modelManager.stopSlotStream(slot)
+                } else if (res is LlmStreamResult.Error) {
+                    finalAnswer = "Error: ${res.throwable.message ?: res.throwable.toString()}"
+                    break
                 }
             }
 

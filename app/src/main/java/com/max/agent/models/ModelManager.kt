@@ -151,7 +151,7 @@ class ModelManager(private val context: Context) {
     suspend fun applyChatTemplateForSlot(slot: Slot, messages: List<ChatMessage>): String? {
         val wrapper = (if (slot == Slot.EVERYDAY) everydayWrapper else coderWrapper) ?: return null
         return runCatching {
-            wrapper.applyChatTemplate(messages.toTypedArray(), null, false, false)
+            wrapper.applyChatTemplate(messages.toTypedArray(), null, false, true)
                 .getOrThrow().formattedText
         }.onFailure { appendErrorLog(it) }.getOrNull()
     }
@@ -505,16 +505,18 @@ class ModelManager(private val context: Context) {
     }
 
     /**
-     * GGUF model loading via llama_cpp plugin with automatic NPU offload.
+     * GGUF model loading via cpu_gpu plugin with NPU offload.
      *
-     * Per Qualcomm's official demo (qualcomm/nexa-sdk):
-     *   plugin_id = "llama_cpp"  (reads .gguf files, supports NPU offload)
-     *   device_id = "hybrid"     (per-tensor HTP+CPU — FAST PATH on Snapdragon)
-     *            | "npu"         (pinned single HTP session)
-     *            | "gpu"         (Adreno OpenCL)
-     *            | "cpu"         (pure CPU, nGpuLayers=0)
+     * SDK 0.0.24 PluginIdValue enum: CPU_GPU("cpu_gpu"), NPU("npu"), ...
+     * SDK 0.0.24 DeviceIdValue enum: CPU(null), GPU("gpu"), NPU("dev0")
      *
-     * Fallback chain: HYBRID → NPU → CPU.
+     * For .gguf models: plugin_id="cpu_gpu" (the ggml backend that reads GGUF).
+     * device_id selects the compute unit: "dev0"=NPU offload, "gpu"=OpenCL, null=CPU.
+     * nGpuLayers controls layer offload count (0=pure CPU, 999=all layers).
+     *
+     * The "npu" plugin_id is for Nexa-optimized .nexa models only — NOT .gguf.
+     *
+     * Fallback chain: NPU offload → GPU → pure CPU.
      */
     private suspend fun tryHardwareAcceleratedLoad(
         slot: Slot,
@@ -531,16 +533,12 @@ class ModelManager(private val context: Context) {
         val ramGb = getTotalRamGb()
         val contextSize = computeAdaptiveContext(ramGb)
 
-        // GGUF models use plugin_id="llama_cpp". device_id selects the compute unit.
-        // Per Qualcomm's official demo (qualcomm/nexa-sdk):
-        //   "hybrid" = per-tensor HTP+CPU scheduler — the FAST PATH on Snapdragon
-        //   "npu"    = pinned single HTP session — deterministic but slower
-        //   "gpu"    = Adreno OpenCL
-        //   "cpu"    = pure CPU, nGpuLayers=0
+        // plugin_id="cpu_gpu" for all .gguf models. device_id selects the compute unit.
+        // Per SDK 0.0.24 DeviceIdValue enum: NPU="dev0", GPU="gpu", CPU=null
         val attempts = listOf(
-            Triple("HYBRID", "hybrid", 999),  // Snapdragon fast path — primary
-            Triple("NPU",    "npu",    999),  // Pinned HTP — deterministic fallback
-            Triple("CPU",    "cpu",    0)     // Pure CPU — last resort
+            Triple("NPU", "dev0", 999),  // Hexagon NPU offload — primary for S25
+            Triple("GPU", "gpu",  999),  // Adreno OpenCL — first fallback
+            Triple("CPU", null,   0)     // Pure CPU — last resort
         )
 
         var lastError: String? = null
@@ -556,7 +554,7 @@ class ModelManager(private val context: Context) {
                 model_path = entry.path,
                 tokenizer_path = null,
                 config = config,
-                plugin_id = "llama_cpp",
+                plugin_id = "cpu_gpu",
                 device_id = deviceId
             )
 
@@ -568,7 +566,7 @@ class ModelManager(private val context: Context) {
                     if (slot == Slot.EVERYDAY) everydayWrapper = wrapper else coderWrapper = wrapper
                     stateFlow.value = ModelState(isLoaded = true, loadedModel = entry)
                     writeSlotConfig(slot, entry.path)
-                    cacheHardwareProfile("llama_cpp", deviceId)
+                    cacheHardwareProfile("cpu_gpu", deviceId ?: "")
                     loaded = true
                 }
                 .onFailure { e ->
@@ -727,21 +725,6 @@ class ModelManager(private val context: Context) {
             slotConfigFile.writeText(json.toString(2))
         } catch (e: Exception) {
             Log.e("ModelManager", "Failed to write slot config", e)
-        }
-    }
-
-    private fun loadSavedSlots() {
-        if (!slotConfigFile.exists()) return
-        try {
-            val json = JSONObject(slotConfigFile.readText())
-            listOf(Slot.EVERYDAY to "everyday", Slot.CODER to "coder").forEach { (slot, key) ->
-                val path = json.optString(key).takeIf { it.isNotEmpty() } ?: return@forEach
-                getAllFromDb().find { it.path == path }?.let { entry ->
-                    loadSlot(slot, entry)
-                }
-            }
-        } catch (e: Exception) {
-            Log.e("ModelManager", "Failed to load saved slots", e)
         }
     }
 
