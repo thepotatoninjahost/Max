@@ -35,7 +35,11 @@ class NativeLogCapture {
          * runtime state, poisoning subsequent CPU/GPU fallback attempts.
          */
         fun isNpuSupported(): Boolean {
-            val soc = "${Build.SOC_MANUFACTURER} ${Build.SOC_MODEL}".lowercase()
+            val soc = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+                "${Build.SOC_MANUFACTURER} ${Build.SOC_MODEL}".lowercase()
+            } else {
+                "unknown"
+            }
             val hardware = Build.HARDWARE.lowercase()
             val board = Build.BOARD.lowercase()
             val fingerprint = Build.FINGERPRINT.lowercase()
@@ -58,12 +62,17 @@ class NativeLogCapture {
          */
         fun chipsetInfo(): String {
             return buildString {
-                append("SOC_MFR=${Build.SOC_MANUFACTURER ?: "unknown"}")
-                append(" SOC_MODEL=${Build.SOC_MODEL ?: "unknown"}")
-                append(" BOARD=${Build.BOARD ?: "unknown"}")
-                append(" HW=${Build.HARDWARE ?: "unknown"}")
-                append(" DEVICE=${Build.DEVICE ?: "unknown"}")
-                append(" MODEL=${Build.MODEL ?: "unknown"}")
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+                    append("SOC_MFR=${Build.SOC_MANUFACTURER ?: "unknown"}")
+                    append(" SOC_MODEL=${Build.SOC_MODEL ?: "unknown"}")
+                } else {
+                    append("SOC_MFR=unknown (API < 31)")
+                    append(" SOC_MODEL=unknown (API < 31)")
+                }
+                append(" BOARD=${Build.BOARD}")
+                append(" HW=${Build.HARDWARE}")
+                append(" DEVICE=${Build.DEVICE}")
+                append(" MODEL=${Build.MODEL}")
                 append(" NPU_SUPPORTED=${isNpuSupported()}")
             }
         }
