@@ -662,15 +662,16 @@ private fun LogTab(max: MaxSystem) {
     val fmt = remember { SimpleDateFormat("HH:mm:ss", Locale.US) }
     val context = androidx.compose.ui.platform.LocalContext.current
     var crashLog by remember { mutableStateOf<String?>(null) }
-    var crashRefresh by remember { mutableIntStateOf(0) }
     var errorLog by remember { mutableStateOf<String?>(null) }
+    var diagLog by remember { mutableStateOf<String?>(null) }
+    var crashRefresh by remember { mutableIntStateOf(0) }
 
-    // Read crash.log if it exists
+    // Read crash.log, errors.log, AND load_diag.log (the detailed native log)
     LaunchedEffect(crashRefresh) {
-        val crashFile = java.io.File(context.filesDir, "crash.log")
-        crashLog = if (crashFile.exists()) crashFile.readText() else null
-        val errorFile = java.io.File(context.filesDir, "errors.log")
-        errorLog = if (errorFile.exists()) errorFile.readText() else null
+        val ctx = context
+        crashLog = java.io.File(ctx.filesDir, "crash.log").takeIf { it.exists() }?.readText()
+        errorLog = java.io.File(ctx.filesDir, "errors.log").takeIf { it.exists() }?.readText()?.take(4000)
+        diagLog = java.io.File(ctx.filesDir, "load_diag.log").takeIf { it.exists() }?.readText()?.takeLast(4000)
     }
 
     Column(Modifier.fillMaxSize().padding(12.dp)) {
@@ -686,29 +687,35 @@ private fun LogTab(max: MaxSystem) {
                 Spacer(Modifier.height(8.dp))
                 Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                     WireframeButton("REFRESH", GhostDim, { crashRefresh++ }, Modifier.weight(1f).height(34.dp))
-                    WireframeButton("CLEAR", AlertRed, {
+                    WireframeButton("CLEAR ALL LOGS", AlertRed, {
                         java.io.File(context.filesDir, "crash.log").delete()
+                        java.io.File(context.filesDir, "errors.log").delete()
+                        java.io.File(context.filesDir, "load_diag.log").delete()
                         crashLog = null
+                        errorLog = null
+                        diagLog = null
                     }, Modifier.weight(1f).height(34.dp))
                 }
             }
         }
 
-        // ── Error log (model load failures, SDK errors) ──
+        // ── Detailed load diagnostic (the REAL native error from logcat) ──
+        if (diagLog != null) {
+            Spacer(Modifier.height(8.dp))
+            Column(Modifier.fillMaxWidth().border(2.dp, WarningYellow, CutCornerShape(6.dp)).background(WarningYellow.copy(alpha = 0.1f)).padding(10.dp)) {
+                MatrixText("⚠ MODEL LOAD DIAGNOSTIC — THE REAL ERROR", WarningYellow, 11, FontWeight.Black)
+                Spacer(Modifier.height(6.dp))
+                MatrixText(diagLog!!, GhostWhite, 8, modifier = Modifier.fillMaxWidth())
+            }
+        }
+
+        // ── Error log (RuntimeException stack traces) ──
         if (errorLog != null) {
             Spacer(Modifier.height(8.dp))
-            Column(Modifier.fillMaxWidth().border(1.dp, WarningYellow, CutCornerShape(6.dp)).background(WarningYellow.copy(alpha = 0.08f)).padding(10.dp)) {
-                MatrixText("⚠ ERROR LOG", WarningYellow, 12, FontWeight.Black)
+            Column(Modifier.fillMaxWidth().border(1.dp, AlertRed.copy(alpha = 0.6f), CutCornerShape(6.dp)).background(AlertRed.copy(alpha = 0.08f)).padding(10.dp)) {
+                MatrixText("ERROR LOG", AlertRed, 11, FontWeight.Bold)
                 Spacer(Modifier.height(6.dp))
-                MatrixText(errorLog!!.take(1200), WarningYellow, 9)
-                Spacer(Modifier.height(8.dp))
-                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                    WireframeButton("REFRESH", GhostDim, { crashRefresh++ }, Modifier.weight(1f).height(34.dp))
-                    WireframeButton("CLEAR", WarningYellow, {
-                        java.io.File(context.filesDir, "errors.log").delete()
-                        errorLog = null
-                    }, Modifier.weight(1f).height(34.dp))
-                }
+                MatrixText(errorLog!!.take(800), AlertRed, 8, modifier = Modifier.fillMaxWidth())
             }
         }
 

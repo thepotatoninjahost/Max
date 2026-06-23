@@ -516,7 +516,13 @@ class ModelManager(private val context: Context) {
      *
      * The "npu" plugin_id is for Nexa-optimized .nexa models only — NOT .gguf.
      *
-     * Fallback chain: NPU offload → GPU → pure CPU.
+     * CRITICAL: NPU offload (device_id="dev0") is ONLY supported on Snapdragon
+     * 8 Elite / 8 Elite Gen 5. On other devices, the NPU attempt fails AND can
+     * corrupt the QNN runtime state, poisoning subsequent CPU/GPU fallbacks.
+     * So we SKIP NPU entirely on unsupported chipsets.
+     *
+     * Fallback chain (NPU-supported): NPU offload → GPU → pure CPU
+     * Fallback chain (NPU-unsupported): GPU → pure CPU
      */
     private suspend fun tryHardwareAcceleratedLoad(
         slot: Slot,
@@ -530,23 +536,47 @@ class ModelManager(private val context: Context) {
             return false
         }
 
-        val ramGb = getTotalRamGb()
-        val contextSize = computeAdaptiveContext(ramGb)
+        // ── Pre-load memory check: can the model actually fit in available RAM? ──
+        val availBytes = getAvailableMemoryBytes()
+        val availGb = availBytes / 1_073_741_824L
+        // Model weights + KV cache overhead (~20% of model size for context)
+        val estimatedMemNeeded = entry.sizeBytes + (entry.sizeBytes / 5)
+        if (estimatedMemNeeded > availBytes) {
+            val msg = "Insufficient memory: model needs ~${estimatedMemNeeded / 1_073_741_824L}GB, " +
+                "only ${availGb}GB available. Free up RAM or use a smaller model."
+            stateFlow.value = ModelState(error = msg)
+            appendErrorLog(RuntimeException(msg))
+            appendDetailedLog("MEMORY CHECK FAILED:\n$msg\n${NativeLogCapture.chipsetInfo()}\n" +
+                "Model: ${entry.name} (${entry.displaySize})\n" +
+                "Available: ${availGb}GB\n")
+            return false
+        }
 
-        // plugin_id="cpu_gpu" for all .gguf models. device_id selects the compute unit.
-        // Per SDK 0.0.24 DeviceIdValue enum: NPU="dev0", GPU="gpu", CPU=null
-        val attempts = listOf(
-            Triple("NPU", "dev0", 999),  // Hexagon NPU offload — primary for S25
-            Triple("GPU", "gpu",  999),  // Adreno OpenCL — first fallback
-            Triple("CPU", null,   0)     // Pure CPU — last resort
-        )
+        val contextSize = computeAdaptiveContext(availGb.toInt())
+
+        // ── Build the attempt chain based on chipset support ──
+        val npuSupported = NativeLogCapture.isNpuSupported()
+        val attempts = mutableListOf<Triple<String, String?, Int>>()
+
+        if (npuSupported) {
+            attempts.add(Triple("NPU", "dev0", 999))  // Hexagon NPU — primary on Snapdragon 8 Elite
+        } else {
+            appendDetailedLog("NPU skipped — chipset not Snapdragon 8 Elite.\n" +
+                "${NativeLogCapture.chipsetInfo()}\n")
+        }
+        attempts.add(Triple("GPU", "gpu", 999))  // Adreno OpenCL
+        attempts.add(Triple("CPU", null, 0))     // Pure CPU — last resort
 
         var lastError: String? = null
+        var lastNativeLog: String? = null
 
         for ((label, deviceId, nGpuLayers) in attempts) {
             stateFlow.value = ModelState(isLoading = true, loadedModel = entry)
 
             writeCrashMarker(entry, label, deviceId)
+
+            // ── Capture native logcat LIVE during this attempt ──
+            val logCapture = NativeLogCapture.start()
 
             val config = ModelConfig(nCtx = contextSize, nGpuLayers = nGpuLayers)
             val input = LlmCreateInput(
@@ -571,7 +601,15 @@ class ModelManager(private val context: Context) {
                 }
                 .onFailure { e ->
                     lastError = "${e::class.simpleName}: ${e.message ?: e.toString()}"
+                    lastNativeLog = logCapture.stop()
                     appendErrorLog(e)
+                    appendDetailedLog("$label LOAD FAILED:\n" +
+                        "Error: $lastError\n" +
+                        "Context: ${contextSize} tokens, nGpuLayers=$nGpuLayers\n" +
+                        "Available RAM: ${availGb}GB\n" +
+                        "Model: ${entry.name} (${entry.displaySize})\n" +
+                        "--- Native logcat ---\n" +
+                        "${lastNativeLog}\n")
                 }
 
             clearCrashMarker()
@@ -611,14 +649,15 @@ class ModelManager(private val context: Context) {
     }
 
     /**
-     * Context window sizing based on available RAM — not model size.
-     * The S25 has 12GB; after OS and app overhead ~7-8GB is free.
-     * A 9B model (~5.5GB weights) + 8K KV cache (~0.5GB) fits comfortably.
+     * Context window sizing based on AVAILABLE RAM — not total RAM.
+     * Total RAM includes OS and background app overhead that we can't use.
+     * Available RAM is what's actually free for model loading.
      */
-    private fun computeAdaptiveContext(ramGb: Int): Int = when {
-        ramGb >= 12 -> 8192
-        ramGb >= 8  -> 4096
-        else        -> 2048
+    private fun computeAdaptiveContext(availGb: Int): Int = when {
+        availGb >= 8  -> 8192
+        availGb >= 5  -> 4096
+        availGb >= 3  -> 2048
+        else          -> 1024
     }
 
     private fun cacheHardwareProfile(pluginId: String, deviceId: String) {
@@ -668,6 +707,33 @@ class ModelManager(private val context: Context) {
         (context.getSystemService(Context.ACTIVITY_SERVICE) as android.app.ActivityManager)
             .getMemoryInfo(memInfo)
         return (memInfo.totalMem / 1_073_741_824L).toInt()
+    }
+
+    /**
+     * Returns AVAILABLE (free) memory in bytes — what's actually usable for
+     * model loading. This is NOT the same as total RAM; the OS and background
+     * apps consume a significant portion. Using total RAM for memory sizing
+     * causes OOM failures on devices that aren't high-end flagships.
+     */
+    private fun getAvailableMemoryBytes(): Long {
+        val memInfo = android.app.ActivityManager.MemoryInfo()
+        (context.getSystemService(Context.ACTIVITY_SERVICE) as android.app.ActivityManager)
+            .getMemoryInfo(memInfo)
+        return memInfo.availMem
+    }
+
+    /**
+     * Writes a detailed diagnostic log to load_diag.log. This captures the
+     * REAL native error (from logcat), chipset info, memory state, and the
+     * exact parameters used for each load attempt. The Log tab surfaces this
+     * so the user can see WHY loading failed — not just the generic wrapper.
+     */
+    private fun appendDetailedLog(content: String) {
+        try {
+            val logFile = File(context.filesDir, "load_diag.log")
+            logFile.parentFile?.mkdirs()
+            logFile.appendText("[${System.currentTimeMillis()}] $content\n\n")
+        } catch (_: Exception) {}
     }
 
     // ====================== Utils ======================

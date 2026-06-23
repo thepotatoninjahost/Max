@@ -116,6 +116,9 @@ object MaxIdentity {
             AVAILABLE TOOLS:
             • SHELL_COMMAND      params: {"cmd": "<shell cmd>"}
             • GET_SYSTEM_STATE   params: {}
+            • SELF_DIAGNOSTIC    params: {} — run a full self-diagnostic: environment, resources,
+              models, self-healing status, self-modification status, network, safety. Use this
+              when the owner asks for a diagnostic, health check, or status report.
             • READ_FILE          params: {"path": "..."}
             • WRITE_FILE         params: {"path": "...", "content": "..."}
             • LIST_DIR           params: {"path": "..."}
@@ -136,6 +139,22 @@ object MaxIdentity {
             • GITHUB_TRIGGER_BUILD  params: {}
             • INSTALL_APK           params: {}
             • HOTSWAP_DEX           params: {"dex": "...", "class": "..."}
+
+            SELF-HEALING CAPABILITIES (always active, you do not invoke these directly):
+            • Failure detection — crashes, runtime exceptions, command failures, model errors
+              are captured automatically and routed to the self-correction pipeline.
+            • Rule-based fixes — simple issues (e.g. permission denied) are fixed automatically.
+            • Agent-driven repair — complex failures are fed back into your reasoning loop so
+              you can diagnose and fix them with your tools (SHELL_COMMAND, EXECUTE_SCRIPT,
+              GITHUB_WRITE_FILE). You will see these as self-healing tasks in your conversation.
+            • Patch generation — for code-level failures, a candidate Kotlin patch is generated
+              and supplied to you for review, correction, and commit via GITHUB_WRITE_FILE.
+            • Hot-swap — live DexClassLoader swaps let you test fixes without a full rebuild.
+            • Failure queue — if no model is loaded when a failure occurs, it is persisted to
+              disk and retried automatically once a model comes online.
+
+            When a self-healing task appears in your conversation, treat it as a real mission:
+            diagnose the root cause, propose a fix, verify it works, then commit it.
 
             RISK LEVELS:
             • low    : pure read, settings panels, volume/brightness/ringer
@@ -205,6 +224,8 @@ class MaxSystem private constructor(val context: Context) {
         githubEngine = githubEngine,
         apkInstaller = apkInstaller,
         networkGuard = networkGuard,
+        resourceMonitor = resourceMonitor,
+        selfCorrectionMachine = selfCorrectionMachine,
         onSetVoice = { g, p, r -> voiceEngine.setVoice(g, p, r) }
     )
     val agentLoop = AgentLoop(modelManager, agency)
@@ -221,13 +242,65 @@ class MaxSystem private constructor(val context: Context) {
 
     private var chatJob: Job? = null
 
-    private fun isCodingTask(msg: String): Boolean {
-        val needles = listOf(
-            "code", "write a", "debug", "refactor", "compile", "function",
-            "class ", "coder", "fix the", "implement", "script", "kotlin",
-            "java", "python", "build"
+    /**
+     * Delta-B: Model-driven task routing.
+     *
+     * Replaces the keyword-matching isCodingTask() heuristic. The EVERYDAY model
+     * is asked to classify the user's request as CODER (coding/programming) or
+     * EVERYDAY (general). This is genuine intelligence, not pattern matching —
+     * the model reads the actual request and decides which slot is better suited.
+     *
+     * Edge cases:
+     * - CODER slot not loaded → always EVERYDAY (no point classifying)
+     * - EVERYDAY slot not loaded → use CODER if available
+     * - Classification fails → safe default to EVERYDAY
+     *
+     * Quality over speed: one short inference round-trip (max 10 tokens) before
+     * the main generation. The user sees "Classifying task..." in the step status.
+     */
+    private suspend fun classifyTask(msg: String): ModelManager.Slot {
+        if (!modelManager.isSlotLoaded(ModelManager.Slot.CODER)) {
+            return ModelManager.Slot.EVERYDAY
+        }
+        if (!modelManager.isSlotLoaded(ModelManager.Slot.EVERYDAY)) {
+            return ModelManager.Slot.CODER
+        }
+
+        val classificationMessages = listOf(
+            com.nexa.sdk.bean.ChatMessage("system",
+                "You are a task router. Classify the user's request as CODER (writing, debugging, refactoring, or architecting code) or EVERYDAY (conversation, research, system control, questions, planning). Reply with exactly one word: CODER or EVERYDAY."),
+            com.nexa.sdk.bean.ChatMessage("user",
+                "Classify this request. Reply with EXACTLY one word: CODER or EVERYDAY.\n\nRequest: \"$msg\"")
         )
-        return needles.any { msg.contains(it, ignoreCase = true) }
+
+        val prompt = modelManager.applyChatTemplateForSlot(ModelManager.Slot.EVERYDAY, classificationMessages)
+            ?: return ModelManager.Slot.EVERYDAY
+
+        val sb = StringBuilder()
+        try {
+            modelManager.generateStreamFlowForSlot(
+                ModelManager.Slot.EVERYDAY, prompt, maxTokens = 10
+            ).collect { result ->
+                when (result) {
+                    is com.nexa.sdk.bean.LlmStreamResult.Token -> {
+                        sb.append(result.text)
+                        if (sb.length > 20) modelManager.stopSlotStream(ModelManager.Slot.EVERYDAY)
+                    }
+                    is com.nexa.sdk.bean.LlmStreamResult.Error -> return ModelManager.Slot.EVERYDAY
+                    is com.nexa.sdk.bean.LlmStreamResult.Completed -> Unit
+                }
+            }
+        } catch (e: Exception) {
+            return ModelManager.Slot.EVERYDAY
+        }
+
+        val response = sb.toString().trim().uppercase()
+        android.util.Log.i("MaxSystem", "Delta-B classification: '$response' for: ${msg.take(80)}")
+        return when {
+            response.contains("CODER") -> ModelManager.Slot.CODER
+            response.contains("EVERYDAY") -> ModelManager.Slot.EVERYDAY
+            else -> ModelManager.Slot.EVERYDAY
+        }
     }
 
     /**
@@ -249,13 +322,6 @@ class MaxSystem private constructor(val context: Context) {
         if (isGenerating) return
         if (_systemState.value !is SystemState.Ready) return
 
-        val slotToUse = if (isCodingTask(msg) && modelManager.isSlotLoaded(ModelManager.Slot.CODER))
-            ModelManager.Slot.CODER
-        else
-            ModelManager.Slot.EVERYDAY
-
-        android.util.Log.i("MaxSystem", "ROUTING to $slotToUse for: ${msg.take(100)}")
-
         conversationHistory.add(UiMessage("user", msg))
         val assistantIndex = conversationHistory.size
         conversationHistory.add(UiMessage("assistant", ""))
@@ -268,31 +334,6 @@ class MaxSystem private constructor(val context: Context) {
             .take(assistantIndex - 1)
             .map { com.nexa.sdk.bean.ChatMessage(it.role, it.content) }
 
-        val systemPrompt = buildString {
-            if (slotToUse == ModelManager.Slot.CODER) {
-                append(
-                    """
-                    You are MAX_CODER — a pure coding specialist embedded in the Max agent.
-                    Your ONLY purpose: generate, debug, refactor, architect, and test code.
-                    Output clean, production-ready, fully working code — no stubs, no placeholders,
-                    no truncation. Include edge-case handling. Use the agency tools (SHELL_COMMAND,
-                    READ_FILE, WRITE_FILE, EXECUTE_SCRIPT, GITHUB_*) when you need to inspect or
-                    change files. Before any tool action, reason through the code: analyze the
-                    problem, consider your approach, explain why. Then emit a single
-                    <action>{...}</action> JSON object. You MAY mix prose reasoning with the
-                    action — think first, then act. Quality over speed. After a tool returns,
-                    reflect on whether the result matches your expectation before proceeding.
-                    """.trimIndent()
-                )
-            } else {
-                append(MaxIdentity.buildSystemPrompt())
-            }
-            if (MaxIdentity.injectLiveContext) {
-                append("\n\n")
-                append(runCatching { captureLiveContext() }.getOrDefault(""))
-            }
-        }
-
         agentLoop.onToken = { token ->
             streamingText += token
             if (assistantIndex < conversationHistory.size) {
@@ -302,6 +343,37 @@ class MaxSystem private constructor(val context: Context) {
         agentLoop.onStep = { step -> stepStatus = step }
 
         chatJob = scope.launch {
+            // Delta-B: Model-driven routing — classify before acting
+            stepStatus = "Classifying task…"
+            val slotToUse = classifyTask(msg)
+            android.util.Log.i("MaxSystem", "ROUTING to $slotToUse for: ${msg.take(100)}")
+            stepStatus = ""
+
+            val systemPrompt = buildString {
+                if (slotToUse == ModelManager.Slot.CODER) {
+                    append(
+                        """
+                        You are MAX_CODER — a pure coding specialist embedded in the Max agent.
+                        Your ONLY purpose: generate, debug, refactor, architect, and test code.
+                        Output clean, production-ready, fully working code — no stubs, no placeholders,
+                        no truncation. Include edge-case handling. Use the agency tools (SHELL_COMMAND,
+                        READ_FILE, WRITE_FILE, EXECUTE_SCRIPT, GITHUB_*) when you need to inspect or
+                        change files. Before any tool action, reason through the code: analyze the
+                        problem, consider your approach, explain why. Then emit a single
+                        <action>{...}</action> JSON object. You MAY mix prose reasoning with the
+                        action — think first, then act. Quality over speed. After a tool returns,
+                        reflect on whether the result matches your expectation before proceeding.
+                        """.trimIndent()
+                    )
+                } else {
+                    append(MaxIdentity.buildSystemPrompt())
+                }
+                if (MaxIdentity.injectLiveContext) {
+                    append("\n\n")
+                    append(runCatching { captureLiveContext() }.getOrDefault(""))
+                }
+            }
+
             val answer = runCatching {
                 agentLoop.run(systemPrompt, history, msg, slotToUse)
             }.getOrElse { "Error: ${it.message ?: it.javaClass.simpleName}" }

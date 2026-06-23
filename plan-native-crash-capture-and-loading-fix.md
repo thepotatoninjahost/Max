@@ -1,5 +1,80 @@
 # Plan: Native Crash Capture + Real Model-Load Diagnosis
 
+## REVISED DIAGNOSIS (2026-06-23) — from master's screenshots Screenshot_20260623_065458/065508
+
+**Evidence (read directly from the two screenshots, not inferred):**
+- Screenshot 1 (System tab): model `Qwen_Qwen2.5-7B-Q4_K_M` (5.75 GB) present and assignable;
+  `SYS_STATE: [ACTIVE]`, `NET: OFF`; a `RuntimeException: llm create failed` shown under COMPUTE CORES.
+- Screenshot 2 (Log tab, ERROR LOG): `java.lang.RuntimeException: Llm create failed,
+  error code: -129515192` thrown from `com.nexa.sdk.LlmWrapper` via `kotlinx.coroutines`.
+
+**Decoded error code:** `-129515192` = unsigned `0xF847C148`. This is **NOT** any documented
+Nexa error code (documented codes are small: `-100001` INVALID_INPUT, `-100201` MODEL_LOAD,
+`-200101` LLM_GENERATION, `-300xxx`/`-400xxx`/`-500xxx`/`-600xxx` per
+https://docs.nexa.ai/en/trouble-shooting/error-code). A 32-bit value this large is a **raw
+native return value leaking through the Kotlin wrapper** — i.e. the native `Llm.create()`
+failed and the SDK wrapped the raw int as `RuntimeException("Llm create failed, error code: …")`.
+
+**This REVISES the original premise of this plan:**
+1. **It is NOT a native SIGSEGV.** The process did not die — the exception was caught and
+   rendered in the UI. Therefore the original Phase 2 premise ("Java handler can't see native
+   SIGSEGV; need NativeCrashWatcher via logcat tombstones") was based on a wrong assumption.
+   `NativeLogCapture` (already implemented) is the correct tool: it captures the native
+   logcat LIVE during the attempt, and `appendDetailedLog` writes it to `load_diag.log`,
+   which the Log tab already renders. **The real failure reason is in `load_diag.log`.**
+2. **The original Phase 1 ("change device_id `dev0` → `null` for NPU") was WRONG and must
+   NOT be applied.** Verified against the actual SDK source (`InputPluginBase.kt`):
+   `enum DeviceIdValue { CPU(null), GPU("gpu"), NPU("dev0") }` and `LlmCreateInput.kt` says
+   "When using the CPU_GPU plugin … you can use either GPU or NPU." So for the `cpu_gpu`
+   plugin, `device_id = "dev0"` IS the correct NPU value. The current code
+   (`Triple("NPU","dev0",999)`) is correct. Applying the old Phase 1 would have broken NPU.
+3. **`tokenizer_path = null` is correct** — it is the SDK default (`val tokenizer_path: String? = null`).
+   The earlier ANALYSIS.md defect #29 ("required-ish, use \"\"") was over-cautious; null is fine.
+
+**Known-issue confirmation:** GitHub `qualcomm/nexa-sdk` issue #864
+("Failed to load OmniNeural-4B-Mobile on Samsung S25 Ultra … Model create() failed error
+code xxxx … The same goes with other models that are intended for mobile NPU") is the SAME
+device class (Snapdragon 8 Elite) and SAME symptom. It is OPEN and unresolved (assigned to
+Nexa engineer zhiyuan8). So this is a known Nexa-on-S25 failure mode, not a master error.
+
+**New leading suspects (to be confirmed from `load_diag.log`, NOT guessed):**
+- **A. NPU path fields empty.** `ModelConfig` has NPU-specific fields
+  (`system_library_path`, `backend_library_path`, `extension_library_path`,
+  `config_file_path`, `embedded_tokens_path`, `npu_lib_folder_path` [doc default =
+  `ApplicationInfo.nativeLibraryDir`], `npu_model_folder_path`). All are `""`/`null` in the
+  current `ModelConfig(...)` construction. If the SDK does not auto-resolve `nativeLibraryDir`
+  when `npu_lib_folder_path` is null, OR the AAR did not ship `libnexa_plugin_npu.so` /
+  the QNN HTP libs in `lib/arm64-v8a/`, the NPU attempt cannot locate the runtime → garbage
+  return. (This is the original plan Question #3.)
+- **B. Genuine memory pressure on the 7B.** Q4_K_M 7B ≈ 5.75 GB + ~20% KV/context ≈ 6.9 GB.
+  On a 12 GB S25 with Android + app overhead, available RAM may be only ~5–6 GB. The Java
+  pre-load guard may pass (if it reads >6.9 GB free) but native mmap/alloc of the GGUF can
+  still fail at the C++ level → raw error code. A smaller model isolates this.
+- **C. GGUF + Snapdragon 8 Elite NPU mismatch.** NPU on the 8 Elite is tuned for Nexa's
+  `.nexa`/OmniNeural models; a plain community `.gguf` (Qwen2.5-7B) may not have a valid
+  QNN-compiled graph, so the NPU attempt fails and (per the code's own comment) "can
+  corrupt the QNN runtime state, poisoning subsequent CPU/GPU fallbacks." If `load_diag.log`
+  shows the NPU attempt failing first and then GPU/CPU also failing, suspect C poisoning B.
+
+**DECISIVE NEXT DIAGNOSTIC (no code change yet — per this plan's own rule #3):**
+1. **Send the contents of `load_diag.log`** from the Log tab (the per-attempt NPU/GPU/CPU
+   native logcat block titled e.g. "NPU LOAD FAILED: … --- Native logcat ---"). This is the
+   single most valuable artifact — it names the failing .so / function / reason.
+2. **Binary isolation test:** try loading a SMALL `.gguf` first (e.g. Qwen2.5-1.5B-Q4_K_M,
+   ~1 GB, or 3B ~2 GB) into the PRIMARY slot.
+   - If the small model LOADS → the 7B failure is memory/NPU-specific (suspects A/B/C scale).
+   - If the small model FAILS with the SAME raw error code → it is a plugin/SDK/NPU-runtime
+     issue independent of size (suspect A or a shipped-libs problem).
+3. (Original Question #3, still valid): does `libnexa_plugin_npu.so` exist inside the APK's
+   `lib/arm64-v8a/`? Checkable by unzipping the APK.
+
+**What is now DEPRIORITIZED (not wrong, just not the blocker):**
+- Original Phase 2 NativeCrashWatcher: the crash is caught, not a SIGSEGV. Keep
+  `NativeLogCapture` (already in place) as the capture mechanism. A tombstone reader is only
+  needed if a future attempt ever produces an actual `Fatal signal 11` in logcat.
+- Original Phase 4 Downloads-folder button: unrelated to the load failure; the model file IS
+  being found (screenshot 1 lists it). Defer.
+
 > STATUS: PROPOSED — awaiting master approval. No code changes until approved.
 > AUDIT METHOD: code-degunker 27-pattern checklist + ground-truth comparison against
 > Nexa SDK 0.0.24 source (`/tmp/nexa_src/extracted/`, re-extracted from Maven Central sources jar).

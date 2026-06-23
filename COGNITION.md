@@ -92,9 +92,62 @@ independent and can be implemented incrementally.
 
 ### Delta B — Intelligent Model Routing
 
-Replace the keyword-matching `isCodingTask()` heuristic with model-driven
-routing: the everyday model classifies the task and selects the appropriate
+**Status: Implemented (2026-06-23).**
+
+Replaced the keyword-matching `isCodingTask()` heuristic with model-driven
+routing: the EVERYDAY model classifies the task and selects the appropriate
 slot. No more pattern-matching on the word "code" or "build."
+
+### Changes
+
+**`core/MaxSystem.kt` — `classifyTask(msg: String): ModelManager.Slot`:**
+- New suspend function replaces `isCodingTask()`.
+- If CODER slot is not loaded → always EVERYDAY (no point classifying).
+- If EVERYDAY slot is not loaded → use CODER if available.
+- Otherwise: sends a short classification prompt (max 10 tokens) to the
+  EVERYDAY model: "Is this CODER or EVERYDAY?" The model reads the actual
+  request and decides — genuine intelligence, not keyword matching.
+- Safe default to EVERYDAY on any classification failure.
+- `sendUserMessage` restructured: slot selection + system prompt building
+  moved inside the coroutine (after classification). User sees
+  "Classifying task…" in the step status during the routing call.
+
+### Prerequisites Implemented Alongside Delta B
+
+Three wiring gaps were fixed as prerequisites — without them, intelligent
+routing alone wouldn't make Max smarter, because Max didn't know its own
+capabilities:
+
+1. **`SELF_DIAGNOSTIC` action added** (`agency/Agency.kt`): New ActionType
+   with a full dispatch — environment (files/cache/models dirs), system state
+   (volume/brightness/wifi/bt/ringer/power-save), resources (CPU/RAM/storage/
+   battery/thermal), models (available + loaded slots + errors), self-healing
+   status (phase, active attempt, history), network, GitHub, safety (constitution,
+   log tamper). Added to system prompt AVAILABLE TOOLS. This is the action Max
+   should emit when the owner asks for a diagnostic — it no longer has to
+   fabricate one and fail.
+
+2. **`GET_SYSTEM_STATE` enriched** (`agency/Agency.kt`): Previously returned
+   only `SystemController.refresh().toString()` (~9 fields). Now returns the
+   full picture: system controller + resource monitor (CPU/RAM/storage/battery/
+   thermal) + model states (both slots) + network policy + GitHub status +
+   self-correction phase. Max sees its actual state, not a sliver of it.
+
+3. **Self-healing awareness added to system prompt** (`core/MaxSystem.kt`):
+   New "SELF-HEALING CAPABILITIES" block tells Max about its failure detection,
+   rule-based fixes, agent-driven repair, patch generation, hot-swap, and
+   failure queue — all of which were already wired in `selffix/` but invisible
+   to the model. Max now knows it can self-heal and how to engage with
+   self-healing tasks when they appear in its conversation.
+
+### What This Unlocks
+
+- Max routes coding tasks to the CODER slot based on understanding the request,
+  not keyword matching. "Help me architect a data pipeline" routes to CODER
+  even though it contains none of the old keywords.
+- Max can run a real self-diagnostic on request (SELF_DIAGNOSTIC action).
+- Max sees its full system state when it checks GET_SYSTEM_STATE.
+- Max knows it has self-healing and can engage with repair tasks proactively.
 
 ### Delta C — Deliberative Search (Tree of Thought)
 

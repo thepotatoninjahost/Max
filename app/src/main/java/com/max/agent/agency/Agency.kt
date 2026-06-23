@@ -34,6 +34,8 @@ class Agency(
     private val githubEngine: GithubEngine,
     private val apkInstaller: ApkInstaller,
     private val networkGuard: NetworkGuard,
+    private val resourceMonitor: com.max.agent.system.ResourceMonitor? = null,
+    private val selfCorrectionMachine: com.max.agent.selffix.SelfCorrectionMachine? = null,
     private val onSetVoice: ((String, Float, Float) -> Unit)? = null
 ) {
     private val maxVault = File(
@@ -46,7 +48,7 @@ class Agency(
     enum class ActionType {
         SHELL_COMMAND, SET_VOLUME, SET_BRIGHTNESS, OPEN_SETTINGS_PANEL,
         RINGER_MODE, TOGGLE_INTERNET, LAUNCH_APP, GET_SYSTEM_STATE,
-        MODIFY_SYSTEM_PROMPT, ADD_RULE, WRITE_FILE, READ_FILE, LIST_DIR,
+        SELF_DIAGNOSTIC, MODIFY_SYSTEM_PROMPT, ADD_RULE, WRITE_FILE, READ_FILE, LIST_DIR,
         EXECUTE_SCRIPT, SET_VOICE, GITHUB_READ_FILE, GITHUB_WRITE_FILE,
         GITHUB_TRIGGER_BUILD, INSTALL_APK, HOTSWAP_DEX, NONE
     }
@@ -97,6 +99,7 @@ class Agency(
         val readOnly = action.type in setOf(
             ActionType.NONE,
             ActionType.GET_SYSTEM_STATE,
+            ActionType.SELF_DIAGNOSTIC,
             ActionType.READ_FILE,
             ActionType.LIST_DIR,
             ActionType.GITHUB_READ_FILE
@@ -187,8 +190,114 @@ class Agency(
         }
 
         ActionType.GET_SYSTEM_STATE -> {
+            val sb = StringBuilder()
+            sb.appendLine("=== SYSTEM STATE ===")
+            // System controller (volume, brightness, wifi, bluetooth, ringer, power-save)
             val snap = systemController.refresh()
-            ActionResult(action, true, snap.toString())
+            sb.appendLine("Volume: media ${snap.mediaVolumePct}%, ring ${snap.ringVolumePct}%, alarm ${snap.alarmVolumePct}%")
+            sb.appendLine("Brightness: ${snap.brightnessPct}%")
+            sb.appendLine("WiFi: ${if (snap.isWifiEnabled) "on" else "off"} | Bluetooth: ${if (snap.isBluetoothEnabled) "on" else "off"}")
+            sb.appendLine("Ringer: ${snap.ringerMode} | Power-save: ${if (snap.isPowerSaveMode) "on" else "off"}")
+            // Resource monitor (CPU, RAM, storage, battery, thermal)
+            resourceMonitor?.let { rm ->
+                val res = rm.state.value
+                sb.appendLine("CPU: ${"%.1f".format(res.cpuPercent)}%")
+                sb.appendLine("RAM: ${res.ramUsedMb}/${res.ramTotalMb} MB (${res.ramUsedPct.toInt()}%)")
+                sb.appendLine("Storage: ${"%.1f".format(res.storageFreeGb)} GB free of ${"%.1f".format(res.storageTotalGb)} GB")
+                sb.appendLine("Battery: ${res.batteryPct}% (${if (res.isCharging) "charging" else "on battery"}, ${res.batteryTempC.toInt()}°C)")
+                sb.appendLine("Thermal: ${res.thermalStatus}")
+            }
+            // Model states
+            val ev = modelManager.everydayState.value
+            val cd = modelManager.coderState.value
+            sb.appendLine("Model PRIMARY: ${ev.loadedModel?.name ?: "none"} ${if (ev.isLoaded) "[loaded]" else if (ev.isLoading) "[loading]" else "[idle]"}")
+            sb.appendLine("Model CODER:   ${cd.loadedModel?.name ?: "none"} ${if (cd.isLoaded) "[loaded]" else if (cd.isLoading) "[loading]" else "[idle]"}")
+            // Network
+            sb.appendLine("Internet policy: ${if (networkGuard.isInternetAllowed()) "ALLOWED" else "RECALLED"}")
+            // GitHub
+            sb.appendLine("GitHub: ${if (githubEngine.isConfigured()) "configured" else "NOT configured"}")
+            // Self-correction
+            selfCorrectionMachine?.let { sc ->
+                sb.appendLine("Self-healing: phase=${sc.phase.value.name}")
+                sc.attempt.value?.let { att ->
+                    sb.appendLine("  active attempt: ${att.failure.type} — ${att.failure.message.take(80)}")
+                }
+            }
+            ActionResult(action, true, sb.toString())
+        }
+
+        ActionType.SELF_DIAGNOSTIC -> {
+            val sb = StringBuilder()
+            sb.appendLine("=== MAX SELF-DIAGNOSTIC REPORT ===")
+            sb.appendLine()
+            // 1. Environment
+            sb.appendLine(terminal.diagnoseSelf())
+            sb.appendLine()
+            // 2. System state (full)
+            val snap = systemController.refresh()
+            sb.appendLine("--- System ---")
+            sb.appendLine("Volume: media ${snap.mediaVolumePct}%, ring ${snap.ringVolumePct}%")
+            sb.appendLine("Brightness: ${snap.brightnessPct}% | Ringer: ${snap.ringerMode}")
+            sb.appendLine("WiFi: ${if (snap.isWifiEnabled) "on" else "off"} | BT: ${if (snap.isBluetoothEnabled) "on" else "off"} | Power-save: ${if (snap.isPowerSaveMode) "on" else "off"}")
+            sb.appendLine()
+            // 3. Resources
+            resourceMonitor?.let { rm ->
+                val res = rm.state.value
+                sb.appendLine("--- Resources ---")
+                sb.appendLine("CPU: ${"%.1f".format(res.cpuPercent)}%")
+                sb.appendLine("RAM: ${res.ramUsedMb}/${res.ramTotalMb} MB (${res.ramUsedPct.toInt()}% used, ${res.ramFreeMb} MB free)")
+                sb.appendLine("Storage: ${"%.1f".format(res.storageFreeGb)} GB free of ${"%.1f".format(res.storageTotalGb)} GB (${res.storageUsedPct.toInt()}% used)")
+                sb.appendLine("Battery: ${res.batteryPct}% (${if (res.isCharging) "charging" else "discharging"}, ${res.batteryTempC.toInt()}°C)")
+                sb.appendLine("Thermal: ${res.thermalStatus}")
+                sb.appendLine()
+            }
+            // 4. Models
+            sb.appendLine("--- Models ---")
+            val avail = modelManager.available.value
+            sb.appendLine("Available models: ${avail.size}")
+            avail.forEach { sb.appendLine("  ${it.name} (${it.displaySize})") }
+            val ev = modelManager.everydayState.value
+            val cd = modelManager.coderState.value
+            sb.appendLine("PRIMARY slot: ${ev.loadedModel?.name ?: "none"} ${if (ev.isLoaded) "[LOADED]" else if (ev.isLoading) "[LOADING...]" else "[idle]"}")
+            ev.error?.let { sb.appendLine("  PRIMARY error: $it") }
+            sb.appendLine("CODER slot:   ${cd.loadedModel?.name ?: "none"} ${if (cd.isLoaded) "[LOADED]" else if (cd.isLoading) "[LOADING...]" else "[idle]"}")
+            cd.error?.let { sb.appendLine("  CODER error: $it") }
+            sb.appendLine()
+            // 5. Self-healing status
+            selfCorrectionMachine?.let { sc ->
+                sb.appendLine("--- Self-Healing ---")
+                sb.appendLine("Phase: ${sc.phase.value.name}")
+                sc.attempt.value?.let { att ->
+                    sb.appendLine("Active attempt: ${att.failure.type} — ${att.failure.message}")
+                    att.log.takeLast(5).forEach { sb.appendLine("  $it") }
+                }
+                val hist = sc.history.value
+                sb.appendLine("History: ${hist.size} attempts (${hist.count { it.resolved }} resolved)")
+                sb.appendLine()
+            }
+            // 6. Self-modification
+            sb.appendLine("--- Self-Modification ---")
+            sb.appendLine("GitHub: ${if (githubEngine.isConfigured()) "configured" else "NOT configured"}")
+            githubEngine.config()?.let { cfg ->
+                sb.appendLine("  repo: ${cfg.owner}/${cfg.repo}@${cfg.branch}")
+            }
+            sb.appendLine("HotSwap patches: ${hotSwapper.listPatches().size} staged")
+            sb.appendLine("HotSwap dex: ${hotSwapper.listDexFiles().size} loaded")
+            sb.appendLine()
+            // 7. Network
+            sb.appendLine("--- Network ---")
+            sb.appendLine("Internet policy: ${if (networkGuard.isInternetAllowed()) "ALLOWED" else "RECALLED"}")
+            sb.appendLine("Enforcement: ${networkGuard.enforcement.value.name}")
+            sb.appendLine()
+            // 8. Safety
+            sb.appendLine("--- Safety ---")
+            sb.appendLine("Constitution: ${Constitution.RULES.size} rules (immutable, v${Constitution.VERSION})")
+            sb.appendLine("ActionLog entries: ${actionLog.entries.value.size}")
+            sb.appendLine("Log tampered: ${actionLog.tampered.value}")
+            sb.appendLine("Permission gate: ${if (permissionGate.isLockedDown()) "LOCKED DOWN" else "nominal"}")
+            sb.appendLine()
+            sb.appendLine("=== END DIAGNOSTIC ===")
+            ActionResult(action, true, sb.toString())
         }
 
         ActionType.MODIFY_SYSTEM_PROMPT -> {
