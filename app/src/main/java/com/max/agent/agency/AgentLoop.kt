@@ -11,7 +11,7 @@ class AgentLoop(
     private val agency: Agency
 ) {
     var onToken: ((String) -> Unit)? = null
-    var onStep:  ((String) -> Unit)? = null
+    var onStep: ((String) -> Unit)? = null
 
     suspend fun run(
         systemPrompt: String,
@@ -19,7 +19,6 @@ class AgentLoop(
         userMessage: String,
         slot: ModelManager.Slot = ModelManager.Slot.EVERYDAY
     ): String = withContext(Dispatchers.IO) {
-        
         val entry = modelManager.getSlotEntry(slot)
             ?: return@withContext "Error: ${slot.name} model not configured."
         if (!modelManager.isSlotLoaded(slot)) {
@@ -38,25 +37,36 @@ class AgentLoop(
             val prompt = modelManager.applyChatTemplateForSlot(slot, messages) ?: break
             val responseBuilder = StringBuilder()
             var actionParsed: Agency.Action? = null
+            var streamErrored = false
 
             modelManager.generateStreamFlowForSlot(slot, prompt).collect { res ->
-                if (res is LlmStreamResult.Token) {
-                    responseBuilder.append(res.text)
-                    onToken?.invoke(res.text)
-                    if (responseBuilder.length > 12000) {
+                when (res) {
+                    is LlmStreamResult.Token -> {
+                        responseBuilder.append(res.text)
+                        onToken?.invoke(res.text)
+                        if (responseBuilder.length > 12000) {
+                            modelManager.stopSlotStream(slot)
+                        }
+                        if (responseBuilder.contains("</action>")) {
+                            actionParsed = agency.parseAction(responseBuilder.toString())
+                        }
+                        if (actionParsed == null) {
+                            extractJsonAction(responseBuilder)?.let { json ->
+                                actionParsed = agency.parseAction(json)
+                            }
+                        }
+                        if (actionParsed != null) modelManager.stopSlotStream(slot)
+                    }
+                    is LlmStreamResult.Error -> {
+                        finalAnswer = "Error: ${res.throwable.message ?: res.throwable.toString()}"
+                        streamErrored = true
                         modelManager.stopSlotStream(slot)
                     }
-                    if (responseBuilder.contains("</action>")) {
-                        actionParsed = agency.parseAction(responseBuilder.toString())
-                    }
-                    if (actionParsed == null) {
-                        extractJsonAction(responseBuilder)?.let { json ->
-                            actionParsed = agency.parseAction(json)
-                        }
-                    }
-                    if (actionParsed != null) modelManager.stopSlotStream(slot)
+                    is LlmStreamResult.Completed -> Unit
                 }
             }
+
+            if (streamErrored) break
 
             if (actionParsed == null) {
                 finalAnswer = responseBuilder.toString()
@@ -67,7 +77,7 @@ class AgentLoop(
             onStep?.invoke("[action] ${actionParsed!!.type}")
             val result = agency.executeAction(actionParsed!!)
             onStep?.invoke(if (result.success) "[ok] ${result.output.take(120)}" else "[fail] ${result.error}")
-            
+
             if (result.isFatal) {
                 return@withContext "FATAL SYSTEM ERROR: ${result.error}"
             }
