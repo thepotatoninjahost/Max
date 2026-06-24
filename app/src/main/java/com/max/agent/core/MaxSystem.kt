@@ -113,6 +113,13 @@ object MaxIdentity {
             ║ R5. If asked for status/diagnostics, ALWAYS run a tool first.         ║
             ║     NEVER invent metrics. NEVER give the owner commands to run.       ║
             ║ R6. Build on prior reasoning across turns. Don't restart from scratch.║
+            ║ R7. YOU CHOOSE YOUR OWN METHODS. You are free to use any approach you  ║
+            ║     decide is best: pattern matching, keyword lists, logical reasoning,║
+            ║     brute force, scripts, shell commands — whatever gets the job done. ║
+            ║     No method is forbidden. No method is mandatory. You decide based on║
+            ║     the task in front of you. Use EXECUTE_SCRIPT to build keyword lists,║
+            ║     match patterns, or implement any technique you need. Your          ║
+            ║     intelligence is in choosing the right tool for the job.            ║
             ╚═══════════════════════════════════════════════════════════════════════╝
 
             AVAILABLE TOOLS (emit as <action>{"type":"TOOL_NAME","params":{...}}</action>):
@@ -257,27 +264,25 @@ class MaxSystem private constructor(val context: Context) {
     /**
      * Delta-B: Model-driven task routing.
      *
-     * Replaces the keyword-matching isCodingTask() heuristic. The EVERYDAY model
-     * is asked to classify the user's request as CODER (coding/programming) or
-     * EVERYDAY (general). This is genuine intelligence, not pattern matching —
-     * the model reads the actual request and decides which slot is better suited.
+     * The EVERYDAY model classifies the user's request as CODER or EVERYDAY.
+     * The model decides — not a hardcoded heuristic. Note: this is about WHO
+     * decides the routing (the model, not the architecture), not about banning
+     * any technique. Max retains full freedom (R7) to use pattern matching,
+     * keyword lists, or any method he chooses for his actual tasks.
      *
-     * Edge cases:
-     * - CODER slot not loaded → always EVERYDAY (no point classifying)
-     * - EVERYDAY slot not loaded → use CODER if available
      * - Classification fails → safe default to EVERYDAY
-     *
-     * Quality over speed: one short inference round-trip (max 10 tokens) before
-     * the main generation. The user sees "Classifying task..." in the step status.
      */
     private suspend fun classifyTask(msg: String): ModelManager.Slot {
-        // Memory guard: if available RAM is low, skip classification entirely.
+        // Memory guard: if available RAM is too low for a classification inference,
+        // default to EVERYDAY. This is a safety measure, not a heuristic —
+        // the model simply can't run, so we pick the general-purpose slot.
         val availMb = getAvailableMemoryMb()
         if (availMb < 2000) {
-            android.util.Log.i("MaxSystem", "Delta-B skipped — low memory (${availMb}MB avail)")
+            android.util.Log.i("MaxSystem", "Delta-B skipped — low memory (${availMb}MB avail), defaulting to EVERYDAY")
             return ModelManager.Slot.EVERYDAY
         }
 
+        // Structural checks — not pattern matching, just "is this slot available?"
         if (!modelManager.isSlotLoaded(ModelManager.Slot.CODER)) {
             return ModelManager.Slot.EVERYDAY
         }
@@ -285,32 +290,14 @@ class MaxSystem private constructor(val context: Context) {
             return ModelManager.Slot.CODER
         }
 
-        // ── Hybrid: fast keyword pre-filter first ──
-        // Obvious coding requests route to CODER instantly — no inference needed.
-        // Only ambiguous requests cost a model call.
-        val lower = msg.lowercase()
-        val strongCodeSignals = listOf(
-            "write a function", "write a class", "debug this", "fix this code",
-            "refactor", "compile", "kotlin", "java code", "python script",
-            "implement a", "code review", "unit test", "regex", "algorithm"
-        )
-        if (strongCodeSignals.any { lower.contains(it) }) {
-            android.util.Log.i("MaxSystem", "Delta-B: keyword match → CODER")
-            return ModelManager.Slot.CODER
-        }
-
-        val strongEverydaySignals = listOf(
-            "diagnostic", "battery", "volume", "brightness", "wifi", "bluetooth",
-            "what time", "what's my", "set my", "open ", "launch ", "read file",
-            "list dir", "hello", "hey max", "status", "system state", "help me"
-        )
-        if (strongEverydaySignals.any { lower.contains(it) }) {
-            android.util.Log.i("MaxSystem", "Delta-B: keyword match → EVERYDAY")
-            return ModelManager.Slot.EVERYDAY
-        }
-
-        // ── Ambiguous request → model-driven classification ──
-        // Only reaches here if keywords didn't match. One short inference.
+        // ── Model-driven classification ──
+        // The model reads the actual request and decides which slot is better suited.
+        // Delta-B: Model-driven routing. The EVERYDAY model classifies the task and
+        // selects the appropriate slot (CODER vs EVERYDAY). The model decides — not
+        // hardcoded heuristics. If the model decides keyword matching is the right
+        // approach for a task, that's its call. Intelligence means choosing your own
+        // methods.
+        // One short inference (max 10 tokens) before the main generation.
         val classificationMessages = listOf(
             com.nexa.sdk.bean.ChatMessage("system",
                 "You are a task router. Classify the user's request as CODER (writing, debugging, refactoring, or architecting code) or EVERYDAY (conversation, research, system control, questions, planning). Reply with exactly one word: CODER or EVERYDAY."),
