@@ -539,6 +539,7 @@ class ModelManager(private val context: Context) {
         // ── Pre-load memory check: can the model actually fit in available RAM? ──
         val availBytes = getAvailableMemoryBytes()
         val availGb = availBytes / 1_073_741_824L
+        val contextSize = computeAdaptiveContext(availGb.toInt())
         // Model weights + KV cache overhead.
         // KV cache for a 7B Q4 model at 2048 context ≈ 256MB, at 4096 ≈ 512MB.
         // The flat 20% estimate was too aggressive — it added ~900MB to a 4.4GB model,
@@ -555,8 +556,6 @@ class ModelManager(private val context: Context) {
                 "Available: ${availGb}GB\n")
             return false
         }
-
-        val contextSize = computeAdaptiveContext(availGb.toInt())
 
         // ── Build the attempt chain based on chipset support ──
         val npuSupported = NativeLogCapture.isNpuSupported()
