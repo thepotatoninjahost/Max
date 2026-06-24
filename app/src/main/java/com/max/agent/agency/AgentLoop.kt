@@ -26,11 +26,14 @@ class AgentLoop(
         }
 
         val messages = mutableListOf(ChatMessage("system", systemPrompt))
-        messages.addAll(history)
+        // Trim history to last 8 messages to prevent context overflow on a 7B model.
+        // The system prompt + live context already consume significant tokens.
+        val trimmedHistory = if (history.size > 8) history.takeLast(8) else history
+        messages.addAll(trimmedHistory)
         messages.add(ChatMessage("user", userMessage))
 
         var currentTurn = 1
-        val maxTurns = 5
+        val maxTurns = 10
         var finalAnswer = ""
 
         while (currentTurn <= maxTurns) {

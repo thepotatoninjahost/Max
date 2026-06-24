@@ -93,6 +93,13 @@ object MaxIdentity {
             yourself as any other model. If asked who you are, say "I am Max."
             The current local date and time is: $now
 
+            CRITICAL: You EXECUTE tools yourself. You do NOT tell the owner to run commands.
+            You do NOT give the owner adb commands. You do NOT say "you can run...".
+            YOU run the tool, YOU get the result, YOU report it back.
+
+            WRONG: I am Qwen
+            WRONG: you can run adb shell...
+
             ╔═══════════════════════════════════════════════════════════════════════╗
             ║  HARD RULES — VIOLATING ANY OF THESE IS A CRITICAL FAILURE             ║
             ╠═══════════════════════════════════════════════════════════════════════╣
@@ -158,10 +165,6 @@ object MaxIdentity {
             <action>{"type":"READ_FILE","params":{"path":"notes.txt"},"risk":"low"}</action>
 
             === END EXAMPLES ===
-
-            CRITICAL: You EXECUTE tools yourself. You do NOT tell the owner to run commands.
-            You do NOT give the owner adb commands. You do NOT say "you can run...".
-            YOU run the tool, YOU get the result, YOU report it back.
 
             LIVE CONTEXT block appended below contains real device state metrics.
         """.trimIndent()
@@ -269,10 +272,8 @@ class MaxSystem private constructor(val context: Context) {
      */
     private suspend fun classifyTask(msg: String): ModelManager.Slot {
         // Memory guard: if available RAM is low, skip classification entirely.
-        // The extra inference call consumes KV cache memory that a phone running
-        // a 7B model on 4GB free simply cannot spare.
         val availMb = getAvailableMemoryMb()
-        if (availMb < 1500) {
+        if (availMb < 2000) {
             android.util.Log.i("MaxSystem", "Delta-B skipped — low memory (${availMb}MB avail)")
             return ModelManager.Slot.EVERYDAY
         }
@@ -284,6 +285,32 @@ class MaxSystem private constructor(val context: Context) {
             return ModelManager.Slot.CODER
         }
 
+        // ── Hybrid: fast keyword pre-filter first ──
+        // Obvious coding requests route to CODER instantly — no inference needed.
+        // Only ambiguous requests cost a model call.
+        val lower = msg.lowercase()
+        val strongCodeSignals = listOf(
+            "write a function", "write a class", "debug this", "fix this code",
+            "refactor", "compile", "kotlin", "java code", "python script",
+            "implement a", "code review", "unit test", "regex", "algorithm"
+        )
+        if (strongCodeSignals.any { lower.contains(it) }) {
+            android.util.Log.i("MaxSystem", "Delta-B: keyword match → CODER")
+            return ModelManager.Slot.CODER
+        }
+
+        val strongEverydaySignals = listOf(
+            "diagnostic", "battery", "volume", "brightness", "wifi", "bluetooth",
+            "what time", "what's my", "set my", "open ", "launch ", "read file",
+            "list dir", "hello", "hey max", "status", "system state", "help me"
+        )
+        if (strongEverydaySignals.any { lower.contains(it) }) {
+            android.util.Log.i("MaxSystem", "Delta-B: keyword match → EVERYDAY")
+            return ModelManager.Slot.EVERYDAY
+        }
+
+        // ── Ambiguous request → model-driven classification ──
+        // Only reaches here if keywords didn't match. One short inference.
         val classificationMessages = listOf(
             com.nexa.sdk.bean.ChatMessage("system",
                 "You are a task router. Classify the user's request as CODER (writing, debugging, refactoring, or architecting code) or EVERYDAY (conversation, research, system control, questions, planning). Reply with exactly one word: CODER or EVERYDAY."),
