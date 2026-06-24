@@ -244,6 +244,13 @@ class MaxSystem private constructor(val context: Context) {
 
     private var chatJob: Job? = null
 
+    private fun getAvailableMemoryMb(): Long {
+        val memInfo = android.app.ActivityManager.MemoryInfo()
+        (context.getSystemService(Context.ACTIVITY_SERVICE) as android.app.ActivityManager)
+            .getMemoryInfo(memInfo)
+        return memInfo.availMem / 1_048_576L
+    }
+
     /**
      * Delta-B: Model-driven task routing.
      *
@@ -261,6 +268,15 @@ class MaxSystem private constructor(val context: Context) {
      * the main generation. The user sees "Classifying task..." in the step status.
      */
     private suspend fun classifyTask(msg: String): ModelManager.Slot {
+        // Memory guard: if available RAM is low, skip classification entirely.
+        // The extra inference call consumes KV cache memory that a phone running
+        // a 7B model on 4GB free simply cannot spare.
+        val availMb = getAvailableMemoryMb()
+        if (availMb < 1500) {
+            android.util.Log.i("MaxSystem", "Delta-B skipped — low memory (${availMb}MB avail)")
+            return ModelManager.Slot.EVERYDAY
+        }
+
         if (!modelManager.isSlotLoaded(ModelManager.Slot.CODER)) {
             return ModelManager.Slot.EVERYDAY
         }

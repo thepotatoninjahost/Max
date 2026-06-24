@@ -20,9 +20,9 @@ class AgentLoop(
         slot: ModelManager.Slot = ModelManager.Slot.EVERYDAY
     ): String = withContext(Dispatchers.IO) {
         val entry = modelManager.getSlotEntry(slot)
-            ?: return@withContext "Error: ${slot.name} model not configured."
+            ?: return@withContext "Error: ${slot.name} model not loaded. Load it from the Models tab first."
         if (!modelManager.isSlotLoaded(slot)) {
-            modelManager.loadSlotAsync(slot, entry)
+            return@withContext "Error: ${slot.name} model was unloaded (possibly by Android memory pressure). Reload it from the Models tab."
         }
 
         val messages = mutableListOf(ChatMessage("system", systemPrompt))

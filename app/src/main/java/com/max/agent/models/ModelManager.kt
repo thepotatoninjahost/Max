@@ -539,8 +539,12 @@ class ModelManager(private val context: Context) {
         // ── Pre-load memory check: can the model actually fit in available RAM? ──
         val availBytes = getAvailableMemoryBytes()
         val availGb = availBytes / 1_073_741_824L
-        // Model weights + KV cache overhead (~20% of model size for context)
-        val estimatedMemNeeded = entry.sizeBytes + (entry.sizeBytes / 5)
+        // Model weights + KV cache overhead.
+        // KV cache for a 7B Q4 model at 2048 context ≈ 256MB, at 4096 ≈ 512MB.
+        // The flat 20% estimate was too aggressive — it added ~900MB to a 4.4GB model,
+        // pushing the total to 5.3GB and failing on phones with 4GB free.
+        val kvCacheBytes = (contextSize.toLong() * 256 * 1024L) // ~256KB per token
+        val estimatedMemNeeded = entry.sizeBytes + kvCacheBytes
         if (estimatedMemNeeded > availBytes) {
             val msg = "Insufficient memory: model needs ~${estimatedMemNeeded / 1_073_741_824L}GB, " +
                 "only ${availGb}GB available. Free up RAM or use a smaller model."
