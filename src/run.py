@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import unittest
 
 from .loop import AgentLoop
 from .reasoning import ReasoningEngine
